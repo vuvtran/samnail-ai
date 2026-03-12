@@ -15,7 +15,6 @@
     #msg { width: 380px; padding: 8px; }
     button { padding: 8px 14px; }
     .user, .ai { margin-bottom: 10px; }
-    .products a { display: block; margin-top: 4px; }
   </style>
 </head>
 <body>
@@ -50,17 +49,7 @@
 
         const data = await response.json();
 
-        let html = `<div class="ai"><strong>AI:</strong><br>${(data.reply || "").replace(/\n/g, "<br>")}</div>`;
-
-        if (data.products && data.products.length) {
-          html += `<div class="products"><strong>Products:</strong>`;
-          data.products.forEach((p) => {
-            html += `<a href="${p.url}" target="_blank">${p.title}${p.price ? " - $" + p.price : ""}</a>`;
-          });
-          html += `</div>`;
-        }
-
-        chat.innerHTML += html;
+        chat.innerHTML += `<div class="ai"><strong>AI:</strong> ${data.reply || "No response"}</div>`;
         chat.scrollTop = chat.scrollHeight;
       } catch (error) {
         chat.innerHTML += `<div class="ai"><strong>AI:</strong> Error connecting to server.</div>`;
