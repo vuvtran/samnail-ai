@@ -3,18 +3,59 @@
 <head>
   <title>SamNail AI Assistant</title>
   <style>
-    body { font-family: Arial, sans-serif; margin: 40px; }
+    body {
+      font-family: Arial, sans-serif;
+      margin: 40px;
+    }
+
+    h2 {
+      margin-bottom: 16px;
+    }
+
     #chat {
       width: 520px;
       height: 420px;
       border: 1px solid #ccc;
-      padding: 10px;
+      padding: 12px;
       overflow-y: auto;
       margin-bottom: 12px;
+      background: #fafafa;
     }
-    #msg { width: 380px; padding: 8px; }
-    button { padding: 8px 14px; }
-    .user, .ai { margin-bottom: 10px; }
+
+    .user, .ai, .error {
+      margin-bottom: 10px;
+      line-height: 1.4;
+    }
+
+    .user strong {
+      color: #111;
+    }
+
+    .ai strong {
+      color: #0b57d0;
+    }
+
+    .error strong {
+      color: #c62828;
+    }
+
+    .input-row {
+      display: flex;
+      gap: 8px;
+      width: 520px;
+    }
+
+    #msg {
+      flex: 1;
+      padding: 10px;
+      font-size: 16px;
+    }
+
+    button {
+      padding: 10px 16px;
+      font-size: 16px;
+      cursor: pointer;
+    }
   </style>
 </head>
 <body>
@@ -22,8 +63,10 @@
 
   <div id="chat"></div>
 
-  <input id="msg" placeholder="Ask about nail products..." />
-  <button onclick="send()">Send</button>
+  <div class="input-row">
+    <input id="msg" placeholder="Ask about nail products..." />
+    <button onclick="send()">Send</button>
+  </div>
 
   <script>
     const SERVER_URL = "https://samnail-ai-production.up.railway.app/api/chat";
@@ -36,6 +79,7 @@
       if (!message) return;
 
       chat.innerHTML += `<div class="user"><strong>You:</strong> ${message}</div>`;
+      chat.scrollTop = chat.scrollHeight;
       input.value = "";
 
       try {
@@ -47,14 +91,26 @@
           body: JSON.stringify({ message })
         });
 
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+
         const data = await response.json();
 
         chat.innerHTML += `<div class="ai"><strong>AI:</strong> ${data.reply || "No response"}</div>`;
         chat.scrollTop = chat.scrollHeight;
       } catch (error) {
-        chat.innerHTML += `<div class="ai"><strong>AI:</strong> Error connecting to server.</div>`;
+        console.error(error);
+        chat.innerHTML += `<div class="error"><strong>AI:</strong> ${error.message}</div>`;
+        chat.scrollTop = chat.scrollHeight;
       }
     }
+
+    document.getElementById("msg").addEventListener("keydown", function(event) {
+      if (event.key === "Enter") {
+        send();
+      }
+    });
   </script>
 </body>
 </html>
