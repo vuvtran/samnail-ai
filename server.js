@@ -1,8 +1,16 @@
 const express = require("express");
+const cors = require("cors");
 
 const app = express();
 
 app.use(express.json());
+
+// Allow local file chat.html, localhost, and Railway domain
+app.use(cors({
+  origin: ["null", "http://localhost:3000", "https://samnail-ai-production.up.railway.app"],
+  methods: ["GET", "POST", "OPTIONS"],
+  allowedHeaders: ["Content-Type"]
+}));
 
 app.use((req, res, next) => {
   console.log("REQUEST:", req.method, req.url);
@@ -22,10 +30,15 @@ app.get("/ping", (req, res) => {
 });
 
 app.post("/api/chat", (req, res) => {
-  const { message } = req.body || {};
-  res.status(200).json({
-    reply: `SamNail AI received: ${message || ""}`
-  });
+  try {
+    const { message } = req.body || {};
+    res.status(200).json({
+      reply: `SamNail AI received: ${message || ""}`
+    });
+  } catch (error) {
+    console.error("CHAT ERROR:", error);
+    res.status(500).json({ error: "Server error" });
+  }
 });
 
 const PORT = process.env.PORT || 3000;
