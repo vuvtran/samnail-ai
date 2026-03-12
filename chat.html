@@ -1,67 +1,69 @@
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
-  <meta charset="UTF-8" />
-  <title>SamNail AI Support</title>
+  <title>SamNail AI Assistant</title>
   <style>
-    body {
-      font-family: Arial, sans-serif;
-      max-width: 700px;
-      margin: 40px auto;
-      padding: 20px;
-    }
-    h1 {
-      margin-bottom: 20px;
-    }
-    textarea {
-      width: 100%;
-      height: 120px;
+    body { font-family: Arial, sans-serif; margin: 40px; }
+    #chat {
+      width: 520px;
+      height: 420px;
+      border: 1px solid #ccc;
       padding: 10px;
-      font-size: 16px;
+      overflow-y: auto;
+      margin-bottom: 12px;
     }
-    button {
-      margin-top: 10px;
-      padding: 10px 18px;
-      font-size: 16px;
-      cursor: pointer;
-    }
-    #reply {
-      margin-top: 20px;
-      padding: 15px;
-      background: #f5f5f5;
-      border-radius: 8px;
-      white-space: pre-wrap;
-    }
+    #msg { width: 380px; padding: 8px; }
+    button { padding: 8px 14px; }
+    .user, .ai { margin-bottom: 10px; }
+    .products a { display: block; margin-top: 4px; }
   </style>
 </head>
 <body>
-  <h1>SamNail AI Support Test</h1>
+  <h2>SamNail AI Assistant</h2>
 
-  <textarea id="question" placeholder="Ask a question, e.g. Where is my order #1002?"></textarea>
-  <br />
-  <button onclick="askAI()">Send</button>
+  <div id="chat"></div>
 
-  <div id="reply"></div>
+  <input id="msg" placeholder="Ask about nail products..." />
+  <button onclick="send()">Send</button>
 
   <script>
-    async function askAI() {
-      const question = document.getElementById("question").value;
-      const replyBox = document.getElementById("reply");
-      replyBox.innerText = "Thinking...";
+    const SERVER_URL = "https://samnail-ai-production.up.railway.app/api/chat";
+
+    async function send() {
+      const input = document.getElementById("msg");
+      const chat = document.getElementById("chat");
+      const message = input.value.trim();
+
+      if (!message) return;
+
+      chat.innerHTML += `<div class="user"><strong>You:</strong> ${message}</div>`;
+      input.value = "";
 
       try {
-        const res = await fetch("http://localhost:3000/ai-support", {
+        const response = await fetch(SERVER_URL, {
           method: "POST",
           headers: {
             "Content-Type": "application/json"
           },
-          body: JSON.stringify({ question })
+          body: JSON.stringify({ message })
         });
 
-        const data = await res.json();
-        replyBox.innerText = data.reply || JSON.stringify(data, null, 2);
-      } catch (err) {
-        replyBox.innerText = "Error: " + err.message;
+        const data = await response.json();
+
+        let html = `<div class="ai"><strong>AI:</strong><br>${(data.reply || "").replace(/\n/g, "<br>")}</div>`;
+
+        if (data.products && data.products.length) {
+          html += `<div class="products"><strong>Products:</strong>`;
+          data.products.forEach((p) => {
+            html += `<a href="${p.url}" target="_blank">${p.title}${p.price ? " - $" + p.price : ""}</a>`;
+          });
+          html += `</div>`;
+        }
+
+        chat.innerHTML += html;
+        chat.scrollTop = chat.scrollHeight;
+      } catch (error) {
+        chat.innerHTML += `<div class="ai"><strong>AI:</strong> Error connecting to server.</div>`;
       }
     }
   </script>
