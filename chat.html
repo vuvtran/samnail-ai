@@ -8,13 +8,9 @@
       margin: 40px;
     }
 
-    h2 {
-      margin-bottom: 16px;
-    }
-
     #chat {
-      width: 520px;
-      height: 420px;
+      width: 560px;
+      height: 440px;
       border: 1px solid #ccc;
       padding: 12px;
       overflow-y: auto;
@@ -24,25 +20,22 @@
 
     .user, .ai, .error {
       margin-bottom: 10px;
-      line-height: 1.4;
+      line-height: 1.5;
     }
 
-    .user strong {
-      color: #111;
+    .products {
+      margin: 8px 0 14px 0;
+      padding-left: 18px;
     }
 
-    .ai strong {
-      color: #0b57d0;
-    }
-
-    .error strong {
-      color: #c62828;
+    .products li {
+      margin-bottom: 6px;
     }
 
     .input-row {
       display: flex;
       gap: 8px;
-      width: 520px;
+      width: 560px;
     }
 
     #msg {
@@ -91,13 +84,23 @@
           body: JSON.stringify({ message })
         });
 
-        if (!response.ok) {
-          throw new Error(`HTTP ${response.status}`);
-        }
-
         const data = await response.json();
 
-        chat.innerHTML += `<div class="ai"><strong>AI:</strong> ${data.reply || "No response"}</div>`;
+        if (!response.ok) {
+          throw new Error(data.detail || data.error || `HTTP ${response.status}`);
+        }
+
+        chat.innerHTML += `<div class="ai"><strong>AI:</strong><br>${(data.reply || "").replace(/\n/g, "<br>")}</div>`;
+
+        if (data.products && data.products.length) {
+          let html = `<ul class="products">`;
+          data.products.forEach((p) => {
+            html += `<li><a href="${p.url}" target="_blank">${p.title}</a>${p.price ? ` - $${p.price}` : ""}</li>`;
+          });
+          html += `</ul>`;
+          chat.innerHTML += html;
+        }
+
         chat.scrollTop = chat.scrollHeight;
       } catch (error) {
         console.error(error);
