@@ -1,79 +1,355 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>SamNail AI Assistant</title>
   <style>
+    * {
+      box-sizing: border-box;
+    }
+
     body {
+      margin: 0;
       font-family: Arial, sans-serif;
-      margin: 40px;
+      background: #f4f6f8;
+      color: #222;
+      display: flex;
+      justify-content: center;
+      padding: 30px 15px;
+    }
+
+    .app {
+      width: 100%;
+      max-width: 760px;
+      background: #ffffff;
+      border-radius: 14px;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.08);
+      overflow: hidden;
+      border: 1px solid #e5e7eb;
+    }
+
+    .header {
+      background: linear-gradient(135deg, #111827, #1f2937);
+      color: #fff;
+      padding: 18px 20px;
+    }
+
+    .header h2 {
+      margin: 0;
+      font-size: 22px;
+    }
+
+    .header p {
+      margin: 6px 0 0 0;
+      font-size: 14px;
+      color: #d1d5db;
     }
 
     #chat {
-      width: 560px;
-      height: 440px;
-      border: 1px solid #ccc;
-      padding: 12px;
+      height: 520px;
       overflow-y: auto;
-      margin-bottom: 12px;
-      background: #fafafa;
+      padding: 18px;
+      background: #f9fafb;
     }
 
-    .user, .ai, .error {
-      margin-bottom: 10px;
+    .message {
+      margin-bottom: 14px;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .bubble {
+      max-width: 86%;
+      padding: 12px 14px;
+      border-radius: 14px;
       line-height: 1.5;
+      font-size: 15px;
+      white-space: pre-wrap;
+      word-wrap: break-word;
     }
 
-    .products {
-      margin: 8px 0 14px 0;
-      padding-left: 18px;
+    .user {
+      align-items: flex-end;
     }
 
-    .products li {
-      margin-bottom: 6px;
+    .user .bubble {
+      background: #2563eb;
+      color: white;
+      border-bottom-right-radius: 4px;
+    }
+
+    .ai {
+      align-items: flex-start;
+    }
+
+    .ai .bubble {
+      background: white;
+      color: #111827;
+      border: 1px solid #e5e7eb;
+      border-bottom-left-radius: 4px;
+    }
+
+    .error .bubble {
+      background: #fef2f2;
+      color: #991b1b;
+      border: 1px solid #fecaca;
+    }
+
+    .products-wrap {
+      margin: 8px 0 18px 0;
+      display: grid;
+      gap: 12px;
+    }
+
+    .product-card {
+      display: flex;
+      gap: 12px;
+      background: #fff;
+      border: 1px solid #e5e7eb;
+      border-radius: 12px;
+      padding: 10px;
+      align-items: center;
+    }
+
+    .product-card img {
+      width: 72px;
+      height: 72px;
+      object-fit: cover;
+      border-radius: 10px;
+      border: 1px solid #e5e7eb;
+      background: #fff;
+      flex-shrink: 0;
+    }
+
+    .product-info {
+      min-width: 0;
+    }
+
+    .product-title {
+      display: inline-block;
+      font-weight: 700;
+      color: #111827;
+      text-decoration: none;
+      margin-bottom: 4px;
+    }
+
+    .product-title:hover {
+      text-decoration: underline;
+    }
+
+    .product-meta {
+      font-size: 14px;
+      color: #4b5563;
+      margin-bottom: 3px;
+    }
+
+    .product-price {
+      font-size: 15px;
+      font-weight: 700;
+      color: #059669;
+    }
+
+    .footer {
+      border-top: 1px solid #e5e7eb;
+      background: #fff;
+      padding: 14px;
     }
 
     .input-row {
       display: flex;
-      gap: 8px;
-      width: 560px;
+      gap: 10px;
     }
 
     #msg {
       flex: 1;
-      padding: 10px;
+      padding: 14px 14px;
       font-size: 16px;
+      border: 1px solid #d1d5db;
+      border-radius: 12px;
+      outline: none;
+    }
+
+    #msg:focus {
+      border-color: #2563eb;
+      box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
     }
 
     button {
-      padding: 10px 16px;
+      border: none;
+      background: #111827;
+      color: #fff;
+      padding: 0 18px;
       font-size: 16px;
+      border-radius: 12px;
       cursor: pointer;
+      min-width: 90px;
+    }
+
+    button:hover {
+      background: #1f2937;
+    }
+
+    button:disabled {
+      background: #9ca3af;
+      cursor: not-allowed;
+    }
+
+    .hint {
+      margin-top: 10px;
+      font-size: 13px;
+      color: #6b7280;
+    }
+
+    .typing {
+      display: inline-block;
+      font-size: 14px;
+      color: #6b7280;
+      padding: 8px 2px 0 2px;
+    }
+
+    @media (max-width: 640px) {
+      #chat {
+        height: 60vh;
+      }
+
+      .bubble {
+        max-width: 94%;
+      }
+
+      .product-card {
+        align-items: flex-start;
+      }
+
+      .product-card img {
+        width: 60px;
+        height: 60px;
+      }
+
+      button {
+        min-width: 78px;
+      }
     }
   </style>
 </head>
 <body>
-  <h2>SamNail AI Assistant</h2>
+  <div class="app">
+    <div class="header">
+      <h2>SamNail AI Assistant</h2>
+      <p>Ask about nail products, dip powder, acrylic, gel, and more.</p>
+    </div>
 
-  <div id="chat"></div>
+    <div id="chat">
+      <div class="message ai">
+        <div class="bubble">
+          Hello! Ask me about products like:
+          <br><br>
+          • nude dip powder
+          <br>
+          • Kiara Sky D431
+          <br>
+          • pink acrylic powder
+        </div>
+      </div>
+    </div>
 
-  <div class="input-row">
-    <input id="msg" placeholder="Ask about nail products..." />
-    <button onclick="send()">Send</button>
+    <div class="footer">
+      <div class="input-row">
+        <input id="msg" type="text" placeholder="Ask about nail products..." autocomplete="off" />
+        <button id="sendBtn" onclick="send()">Send</button>
+      </div>
+      <div class="hint">Press Enter to send</div>
+    </div>
   </div>
 
   <script>
     const SERVER_URL = "https://samnail-ai-production.up.railway.app/api/chat";
 
-    async function send() {
-      const input = document.getElementById("msg");
-      const chat = document.getElementById("chat");
-      const message = input.value.trim();
+    const chat = document.getElementById("chat");
+    const input = document.getElementById("msg");
+    const sendBtn = document.getElementById("sendBtn");
 
+    function escapeHtml(str) {
+      return String(str)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+    }
+
+    function addMessage(role, text) {
+      const wrapper = document.createElement("div");
+      wrapper.className = `message ${role}`;
+
+      const bubble = document.createElement("div");
+      bubble.className = "bubble";
+      bubble.innerHTML = escapeHtml(text).replace(/\n/g, "<br>");
+
+      wrapper.appendChild(bubble);
+      chat.appendChild(wrapper);
+      chat.scrollTop = chat.scrollHeight;
+    }
+
+    function addProducts(products) {
+      if (!products || !products.length) return;
+
+      const wrap = document.createElement("div");
+      wrap.className = "products-wrap";
+
+      products.forEach((p) => {
+        const card = document.createElement("div");
+        card.className = "product-card";
+
+        const safeTitle = escapeHtml(p.title || "Untitled product");
+        const safeVendor = escapeHtml(p.vendor || "");
+        const safeType = escapeHtml(p.product_type || "");
+        const safePrice = p.price ? `$${escapeHtml(String(p.price))}` : "";
+        const safeUrl = p.url || "#";
+        const safeImage = p.image || "";
+
+        card.innerHTML = `
+          ${safeImage ? `<img src="${safeImage}" alt="${safeTitle}">` : ""}
+          <div class="product-info">
+            <a class="product-title" href="${safeUrl}" target="_blank" rel="noopener noreferrer">${safeTitle}</a>
+            ${safeVendor ? `<div class="product-meta">Brand: ${safeVendor}</div>` : ""}
+            ${safeType ? `<div class="product-meta">Type: ${safeType}</div>` : ""}
+            ${safePrice ? `<div class="product-price">${safePrice}</div>` : ""}
+          </div>
+        `;
+
+        wrap.appendChild(card);
+      });
+
+      chat.appendChild(wrap);
+      chat.scrollTop = chat.scrollHeight;
+    }
+
+    function addTyping() {
+      const typing = document.createElement("div");
+      typing.className = "message ai";
+      typing.id = "typing";
+
+      typing.innerHTML = `<div class="typing">AI is searching products...</div>`;
+      chat.appendChild(typing);
+      chat.scrollTop = chat.scrollHeight;
+    }
+
+    function removeTyping() {
+      const typing = document.getElementById("typing");
+      if (typing) typing.remove();
+    }
+
+    async function send() {
+      const message = input.value.trim();
       if (!message) return;
 
-      chat.innerHTML += `<div class="user"><strong>You:</strong> ${message}</div>`;
-      chat.scrollTop = chat.scrollHeight;
+      addMessage("user", message);
       input.value = "";
+      input.focus();
+
+      sendBtn.disabled = true;
+      addTyping();
 
       try {
         const response = await fetch(SERVER_URL, {
@@ -85,31 +361,24 @@
         });
 
         const data = await response.json();
+        removeTyping();
 
         if (!response.ok) {
           throw new Error(data.detail || data.error || `HTTP ${response.status}`);
         }
 
-        chat.innerHTML += `<div class="ai"><strong>AI:</strong><br>${(data.reply || "").replace(/\n/g, "<br>")}</div>`;
-
-        if (data.products && data.products.length) {
-          let html = `<ul class="products">`;
-          data.products.forEach((p) => {
-            html += `<li><a href="${p.url}" target="_blank">${p.title}</a>${p.price ? ` - $${p.price}` : ""}</li>`;
-          });
-          html += `</ul>`;
-          chat.innerHTML += html;
-        }
-
-        chat.scrollTop = chat.scrollHeight;
+        addMessage("ai", data.reply || "No response returned.");
+        addProducts(data.products || []);
       } catch (error) {
+        removeTyping();
+        addMessage("error", error.message || "Error connecting to server.");
         console.error(error);
-        chat.innerHTML += `<div class="error"><strong>AI:</strong> ${error.message}</div>`;
-        chat.scrollTop = chat.scrollHeight;
+      } finally {
+        sendBtn.disabled = false;
       }
     }
 
-    document.getElementById("msg").addEventListener("keydown", function(event) {
+    input.addEventListener("keydown", function (event) {
       if (event.key === "Enter") {
         send();
       }
