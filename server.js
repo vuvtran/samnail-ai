@@ -7,7 +7,9 @@ app.use(express.json());
 
 const allowedOrigins = [
   "http://localhost:3000",
-  "https://samnail-ai-production.up.railway.app"
+  "https://samnail-ai-production.up.railway.app",
+  "https://samnailsupply.com",
+  "https://www.samnailsupply.com"
 ];
 
 app.use(cors({
@@ -15,7 +17,7 @@ app.use(cors({
     if (!origin || origin === "null" || allowedOrigins.includes(origin)) {
       return callback(null, true);
     }
-    return callback(new Error("Not allowed by CORS"));
+    return callback(new Error("Not allowed by CORS: " + origin));
   },
   methods: ["GET", "POST", "OPTIONS"],
   allowedHeaders: ["Content-Type"]
@@ -38,6 +40,10 @@ app.get("/ping", (req, res) => {
   res.status(200).send("pong");
 });
 
+app.get("/api/chat", (req, res) => {
+  res.status(200).send("API chat route is live. Use POST to send a message.");
+});
+
 function escapeShopifySearch(text) {
   return String(text || "")
     .trim()
@@ -45,9 +51,34 @@ function escapeShopifySearch(text) {
     .replace(/\s+/g, " ");
 }
 
+function buildShopifyQuery(cleaned) {
+  return [
+    `title:*${cleaned}*`,
+    `tag:*${cleaned}*`,
+    `product_type:*${cleaned}*`,
+    `sku:*${cleaned}*`,
+    `vendor:*${cleaned}*`
+  ].join(" OR ");
+}
+
+function scoreVariantMatch(variant, searchText) {
+  const q = String(searchText || "").toLowerCase();
+  const sku = String(variant?.sku || "").toLowerCase();
+  const title = String(variant?.title || "").toLowerCase();
+
+  let score = 0;
+
+  if (!q) return score;
+
+  if (sku === q) score += 100;
+  if (sku.includes(q)) score += 60;
+  if (title.includes(q)) score += 30;
+
+  return score;
+}
+
 async function searchShopifyProducts(searchText) {
-  const store =
-    process.env.SHOPIFY_STORE_DOMAIN || process.env.SHOPIFY_STORE;
+  const store = process.env.SHOPIFY_STORE_DOMAIN || process.env.SHOPIFY_STORE;
   const token = process.env.SHOPIFY_ACCESS_TOKEN;
 
   if (!store || !token) {
@@ -60,7 +91,7 @@ async function searchShopifyProducts(searchText) {
     return [];
   }
 
-  const queryString = `title:*${cleaned}* OR tag:*${cleaned}* OR product_type:*${cleaned}*`;
+  const queryString = buildShopifyQuery(cleaned);
 
   const graphqlQuery = `
     query SearchProducts($query: String!) {
@@ -72,13 +103,18 @@ async function searchShopifyProducts(searchText) {
             handle
             vendor
             productType
+            tags
             featuredImage {
               url
             }
-            variants(first: 1) {
+            variants(first: 10) {
               edges {
                 node {
+                  id
+                  title
+                  sku
                   price
+                  inventoryQuantity
                 }
               }
             }
@@ -121,7 +157,18 @@ async function searchShopifyProducts(searchText) {
 
   return edges.map((edge) => {
     const p = edge.node;
-    const firstVariant = p?.variants?.edges?.[0]?.node || null;
+    const variants = (p?.variants?.edges || []).map((v) => v.node);
+
+    let bestVariant = variants[0] || null;
+
+    if (variants.length > 1) {
+      bestVariant = variants
+        .map((variant) => ({
+          ...variant,
+          _score: scoreVariantMatch(variant, cleaned)
+        }))
+        .sort((a, b) => b._score - a._score)[0];
+    }
 
     return {
       id: p.id,
@@ -129,8 +176,13 @@ async function searchShopifyProducts(searchText) {
       handle: p.handle,
       vendor: p.vendor,
       product_type: p.productType,
+      tags: p.tags || [],
       image: p.featuredImage?.url || null,
-      price: firstVariant?.price || null,
+      variant_id: bestVariant?.id || null,
+      variant_title: bestVariant?.title || null,
+      sku: bestVariant?.sku || null,
+      price: bestVariant?.price || null,
+      inventory: bestVariant?.inventoryQuantity ?? null,
       url: `https://samnailsupply.com/products/${p.handle}`
     };
   });
@@ -142,7 +194,12 @@ function formatReply(products, originalMessage) {
   }
 
   return products
-    .map((p, i) => `${i + 1}. ${p.title}${p.price ? ` - $${p.price}` : ""}`)
+    .map((p, i) => {
+      const priceText = p.price ? ` - $${p.price}` : "";
+      const skuText = p.sku ? ` | SKU: ${p.sku}` : "";
+      const stockText = p.inventory !== null ? ` | Stock: ${p.inventory}` : "";
+      return `${i + 1}. ${p.title}${priceText}${skuText}${stockText}`;
+    })
     .join("\n");
 }
 
