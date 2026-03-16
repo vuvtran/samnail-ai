@@ -202,10 +202,6 @@ function isLowStock(inventory) {
   return inventory !== null && inventory !== undefined && Number(inventory) > 0 && Number(inventory) <= 5;
 }
 
-function normalizeText(value) {
-  return String(value || "").trim().toLowerCase();
-}
-
 function detectBudget(message) {
   const text = String(message || "").toLowerCase();
 
@@ -304,6 +300,24 @@ function detectColorFamily(message) {
   return colors.find((c) => text.includes(c)) || null;
 }
 
+function detectProfessionalIntent(message) {
+  const text = String(message || "").toLowerCase();
+
+  const proWords = [
+    "salon",
+    "technician",
+    "tech",
+    "professional",
+    "wholesale",
+    "bulk",
+    "case",
+    "dozen",
+    "supply"
+  ];
+
+  return proWords.some((w) => text.includes(w));
+}
+
 function scoreProductMatch(product, message) {
   const text = String(message || "").toLowerCase();
   let score = 0;
@@ -345,39 +359,88 @@ function rankProducts(products, message) {
   return [...products].sort((a, b) => scoreProductMatch(b, message) - scoreProductMatch(a, message));
 }
 
-function buildSalesFollowUp(message, products) {
-  const brand = detectBrand(message);
-  const type = detectProductType(message);
-  const color = detectColorFamily(message);
+function getBundleSuggestions(message, bestProduct) {
+  const text = String(message || "").toLowerCase();
+  const title = String(bestProduct?.title || "").toLowerCase();
+  const type = String(bestProduct?.product_type || "").toLowerCase();
 
-  if (!type) return "Do you want gel, dip, acrylic, or regular polish?";
-  if (!color && type) return "Do you want a nude, pink, red, glitter, or another color family?";
-  if (products.length > 1) return "Would you like the best value option, the best match, or the top 3 to compare?";
-  if (brand) return `Would you like me to show more ${brand.toUpperCase()} options like this one?`;
-
-  return "Would you like me to show matching items or similar alternatives?";
-}
-
-function buildBeautySalesReply(products, originalMessage) {
-  if (!products || !products.length) {
-    const brand = detectBrand(originalMessage);
-    const type = detectProductType(originalMessage);
-
-    if (!brand && !type) {
-      return "I can help with that. Send me the brand, product type, color, SKU, or budget you want, and I’ll narrow it down for you.";
-    }
-
-    return `I couldn’t find an exact match for "${originalMessage}", but I can help you narrow it down. Try adding the color, SKU, or budget you want.`;
+  if (text.includes("dip") || title.includes("dip") || type.includes("dip")) {
+    return ["base coat", "activator", "top coat"];
   }
 
-  const ranked = rankProducts(products, originalMessage);
-  const best = ranked[0];
-  const alternatives = ranked.slice(1, 3);
+  if (text.includes("acrylic") || title.includes("acrylic") || type.includes("acrylic")) {
+    return ["monomer", "primer", "acrylic brush"];
+  }
 
-  const bestPrice = best.price ? formatMoney(best.price) : null;
-  const lowStock = best.inventory !== null && best.inventory !== undefined && Number(best.inventory) > 0 && Number(best.inventory) <= 5;
+  if (text.includes("gel") || title.includes("gel") || type.includes("gel")) {
+    return ["base coat", "top coat", "UV/LED lamp"];
+  }
 
-  let reply = `I found ${ranked.length === 1 ? "a strong option" : "some strong options"} for you. `;
+  if (text.includes("polish") || title.includes("polish") || type.includes("polish")) {
+    return ["base coat", "top coat", "cuticle oil"];
+  }
+
+  return [];
+}
+
+function buildSalesClosing(message, products) {
+  const best = products?.[0];
+  if (!best) return "";
+
+  const bundle = getBundleSuggestions(message, best);
+  const isPro = detectProfessionalIntent(message);
+
+  if (bundle.length && isPro) {
+    return ` If you're buying for salon use, I can also show the matching ${bundle.join(", ")} to complete the set.`;
+  }
+
+  if (bundle.length) {
+    return ` I can also show matching ${bundle.join(" and ")} if you want the full set.`;
+  }
+
+  return " If you want, I can also show similar options, best sellers, or the best value choice.";
+}
+
+function buildBetterFollowUp(message, products) {
+  const type = detectProductType(message);
+  const color = detectColorFamily(message);
+  const brand = detectBrand(message);
+  const isPro = detectProfessionalIntent(message);
+
+  if (!type) {
+    return "Do you want gel, dip, acrylic, or regular polish?";
+  }
+
+  if (!color) {
+    return "Do you want a nude, pink, red, glitter, pastel, or another color family?";
+  }
+
+  if (products.length > 1 && isPro) {
+    return "Would you like the best value option, the best salon-use option, or the top 3 to compare?";
+  }
+
+  if (products.length > 1) {
+    return "Would you like the best value option, the closest match, or the top 3 to compare?";
+  }
+
+  if (brand) {
+    return `Would you like me to show more ${brand.toUpperCase()} options like this one?`;
+  }
+
+  return "Would you like me to show similar options or matching add-ons?";
+}
+
+function buildBeautySalesReplyV2(products, originalMessage) {
+  if (!products || !products.length) {
+    return "I couldn’t find an exact match yet. Send me the brand, product type, color, SKU, or budget you want, and I’ll narrow it down for you.";
+  }
+
+  const best = products[0];
+  const alternatives = products.slice(1, 3);
+  const bestPrice = best.price ? formatMoney(best.price) : "";
+  const lowStock = isLowStock(best.inventory);
+
+  let reply = `I found ${products.length === 1 ? "a great option" : "some strong options"} for you. `;
   reply += `My best match is ${best.title}`;
 
   if (bestPrice) {
@@ -386,19 +449,20 @@ function buildBeautySalesReply(products, originalMessage) {
 
   if (best.inventory !== null && best.inventory !== undefined) {
     if (Number(best.inventory) > 0) {
-      reply += lowStock ? `, and it’s low in stock right now` : `, and it’s in stock now`;
+      reply += lowStock ? ", and it’s low in stock right now" : ", and it’s in stock now";
     } else {
-      reply += `, but it looks out of stock`;
+      reply += ", but it looks out of stock";
     }
   }
 
   reply += ".";
 
   if (alternatives.length) {
-    reply += ` I also found ${alternatives.length === 1 ? "1 close alternative" : `${alternatives.length} close alternatives`} if you want to compare.`;
+    reply += ` I also found ${alternatives.length === 1 ? "1 close alternative" : `${alternatives.length} similar options`} if you’d like to compare.`;
   }
 
-  reply += ` ${buildSalesFollowUp(originalMessage, ranked)}`;
+  reply += buildSalesClosing(originalMessage, products);
+  reply += ` ${buildBetterFollowUp(originalMessage, products)}`;
 
   return reply;
 }
@@ -932,7 +996,7 @@ app.post("/api/chat", async (req, res) => {
     products = rankProducts(products, message);
 
     return res.status(200).json({
-      reply: buildBeautySalesReply(products, message),
+      reply: buildBeautySalesReplyV2(products, message),
       type: "product",
       products
     });
