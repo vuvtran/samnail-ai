@@ -1,10 +1,14 @@
 const express = require("express");
 const cors = require("cors");
 const { Pool } = require("pg");
+const OpenAI = require("openai");
 
 const app = express();
-
 app.use(express.json());
+
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY
+});
 
 const allowedOrigins = [
   "http://localhost:3000",
@@ -50,6 +54,13 @@ function getShopifyToken() {
 }
 
 async function initDb() {
+  try {
+    await pool.query(`CREATE EXTENSION IF NOT EXISTS vector;`);
+    console.log("pgvector extension ready");
+  } catch (error) {
+    console.warn("Could not enable pgvector extension:", error.message);
+  }
+
   await pool.query(`
     CREATE TABLE IF NOT EXISTS products (
       id TEXT PRIMARY KEY,
@@ -59,6 +70,8 @@ async function initDb() {
       product_type TEXT,
       tags TEXT,
       image TEXT,
+      embedding_text TEXT,
+      embedding VECTOR(1536),
       updated_at TIMESTAMP DEFAULT NOW()
     );
   `);
@@ -98,21 +111,26 @@ app.get("/", (req, res) => {
   res.status(200).send("SamNail AI server is running");
 });
 
+app.get("/ping", (req, res) => {
+  res.status(200).send("pong");
+});
+
 app.get("/health", async (req, res) => {
   try {
     await pool.query("SELECT 1");
-    res.status(200).json({ status: "ok", db: "connected" });
+    res.status(200).json({
+      status: "ok",
+      db: "connected",
+      openai: process.env.OPENAI_API_KEY ? "configured" : "missing"
+    });
   } catch (error) {
     res.status(200).json({
       status: "ok",
       db: "disconnected",
-      detail: error.message || "Database not connected"
+      detail: error.message || "Database not connected",
+      openai: process.env.OPENAI_API_KEY ? "configured" : "missing"
     });
   }
-});
-
-app.get("/ping", (req, res) => {
-  res.status(200).send("pong");
 });
 
 app.get("/api/chat", (req, res) => {
@@ -333,6 +351,31 @@ function extractSearchKeywords(message) {
     .slice(0, 6);
 }
 
+function expandKeywords(words) {
+  const expanded = [...words];
+
+  words.forEach((w) => {
+    if (w === "dip") expanded.push("dipping");
+    if (w === "dipping") expanded.push("dip");
+
+    if (w === "gel") {
+      expanded.push("gel polish");
+      expanded.push("gel color");
+    }
+
+    if (w === "polish") expanded.push("nail lacquer");
+
+    if (w === "nude") {
+      expanded.push("natural");
+      expanded.push("beige");
+    }
+
+    if (w === "pink") expanded.push("rose");
+  });
+
+  return [...new Set(expanded)];
+}
+
 function scoreProductMatch(product, message) {
   const text = String(message || "").toLowerCase();
   let score = 0;
@@ -531,8 +574,33 @@ function buildSmartOrderReply(order, originalMessage) {
   }
 
   reply += " Let me know if you want help with shipping, delivery timing, or finding another product while you wait.";
-
   return reply;
+}
+
+function buildEmbeddingText(product, variant = null) {
+  const parts = [
+    product.title || "",
+    product.vendor || "",
+    product.productType || "",
+    Array.isArray(product.tags) ? product.tags.join(", ") : "",
+    variant?.title || "",
+    variant?.sku || ""
+  ];
+
+  return parts.filter(Boolean).join(" | ");
+}
+
+async function createEmbedding(text) {
+  const input = String(text || "").trim();
+  if (!input) return null;
+  if (!process.env.OPENAI_API_KEY) return null;
+
+  const result = await openai.embeddings.create({
+    model: "text-embedding-3-small",
+    input
+  });
+
+  return result.data[0].embedding;
 }
 
 async function shopifyGraphQL(query, variables = {}) {
@@ -707,9 +775,7 @@ async function searchShopifyOrderByNumberAndEmail(orderNumber, email) {
       const order = edge.node;
       const orderEmail = String(order?.customer?.email || "").toLowerCase().trim();
 
-      if (orderEmail !== String(email).toLowerCase().trim()) {
-        continue;
-      }
+      if (orderEmail !== String(email).toLowerCase().trim()) continue;
 
       const customerName = [
         order?.customer?.firstName || "",
@@ -747,10 +813,20 @@ async function searchShopifyOrderByNumberAndEmail(orderNumber, email) {
 }
 
 async function upsertProductAndVariants(product) {
+  const firstVariant = product?.variants?.edges?.[0]?.node || null;
+  const embeddingText = buildEmbeddingText(product, firstVariant);
+
+  let embedding = null;
+  try {
+    embedding = await createEmbedding(embeddingText);
+  } catch (error) {
+    console.warn("Embedding creation failed for product", product?.id, error.message);
+  }
+
   await pool.query(
     `
-    INSERT INTO products (id, title, handle, vendor, product_type, tags, image, updated_at)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())
+    INSERT INTO products (id, title, handle, vendor, product_type, tags, image, embedding_text, embedding, updated_at)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::vector,NOW())
     ON CONFLICT (id) DO UPDATE SET
       title = EXCLUDED.title,
       handle = EXCLUDED.handle,
@@ -758,6 +834,8 @@ async function upsertProductAndVariants(product) {
       product_type = EXCLUDED.product_type,
       tags = EXCLUDED.tags,
       image = EXCLUDED.image,
+      embedding_text = EXCLUDED.embedding_text,
+      embedding = EXCLUDED.embedding,
       updated_at = NOW()
     `,
     [
@@ -767,7 +845,9 @@ async function upsertProductAndVariants(product) {
       product.vendor,
       product.productType,
       Array.isArray(product.tags) ? product.tags.join(", ") : "",
-      product.featuredImage?.url || null
+      product.featuredImage?.url || null,
+      embeddingText,
+      embedding ? `[${embedding.join(",")}]` : null
     ]
   );
 
@@ -839,7 +919,10 @@ async function fetchShopifyProductsPage(limit = 50, afterCursor = null) {
     after: afterCursor
   });
 
-  return result?.data?.products || { pageInfo: { hasNextPage: false, endCursor: null }, edges: [] };
+  return result?.data?.products || {
+    pageInfo: { hasNextPage: false, endCursor: null },
+    edges: []
+  };
 }
 
 async function syncProductsFromShopify(limit = 50) {
@@ -886,7 +969,9 @@ async function syncAllProductsFromShopify(batchSize = 250, maxPages = 500) {
 }
 
 async function searchProductsFromDb(searchText) {
-  const keywords = extractSearchKeywords(searchText);
+  let keywords = extractSearchKeywords(searchText);
+  keywords = expandKeywords(keywords);
+
   if (!keywords.length) return [];
 
   const likeTerms = keywords.map((k) => `%${k}%`);
@@ -940,6 +1025,57 @@ async function searchProductsFromDb(searchText) {
     price: row.price,
     inventory: row.inventory,
     url: `https://samnailsupply.com/products/${row.handle}`
+  }));
+}
+
+async function semanticSearchProducts(searchText, limit = 10) {
+  if (!process.env.OPENAI_API_KEY) return [];
+
+  const embedding = await createEmbedding(searchText);
+  if (!embedding) return [];
+
+  const vectorLiteral = `[${embedding.join(",")}]`;
+
+  const result = await pool.query(
+    `
+    SELECT
+      p.id,
+      p.title,
+      p.handle,
+      p.vendor,
+      p.product_type,
+      p.image,
+      v.id AS variant_id,
+      v.title AS variant_title,
+      v.sku,
+      v.price,
+      v.inventory,
+      p.embedding_text,
+      (p.embedding <=> $1::vector) AS distance
+    FROM products p
+    LEFT JOIN variants v ON v.product_id = p.id
+    WHERE p.embedding IS NOT NULL
+    ORDER BY p.embedding <=> $1::vector ASC
+    LIMIT $2
+    `,
+    [vectorLiteral, limit]
+  );
+
+  return result.rows.map((row) => ({
+    type: "product",
+    id: row.id,
+    title: row.title,
+    handle: row.handle,
+    vendor: row.vendor,
+    product_type: row.product_type,
+    image: row.image,
+    variant_id: row.variant_id,
+    variant_title: row.variant_title,
+    sku: row.sku,
+    price: row.price,
+    inventory: row.inventory,
+    url: `https://samnailsupply.com/products/${row.handle}`,
+    semantic_distance: row.distance
   }));
 }
 
@@ -1020,13 +1156,29 @@ app.post("/api/chat", async (req, res) => {
       console.error("DB SEARCH ERROR:", dbError.message);
     }
 
-    if (!products.length) {
-      console.log("DB returned no results, falling back to Shopify live search");
-      products = await searchShopifyProducts(message);
-    }
-
     products = applyBudgetFilter(products, message);
     products = rankProducts(products, message);
+
+    if (!products.length) {
+      try {
+        products = await semanticSearchProducts(message, 10);
+        products = applyBudgetFilter(products, message);
+        products = rankProducts(products, message);
+      } catch (semanticError) {
+        console.error("SEMANTIC SEARCH ERROR:", semanticError.message);
+      }
+    }
+
+    if (!products.length) {
+      try {
+        console.log("No DB or semantic match, falling back to Shopify live search");
+        products = await searchShopifyProducts(message);
+        products = applyBudgetFilter(products, message);
+        products = rankProducts(products, message);
+      } catch (shopifyError) {
+        console.error("SHOPIFY FALLBACK ERROR:", shopifyError.message);
+      }
+    }
 
     return res.status(200).json({
       reply: buildBeautySalesReplyV2(products, message),
