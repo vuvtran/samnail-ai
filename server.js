@@ -35,9 +35,10 @@ const pool = new Pool({
   database: process.env.PGDATABASE,
   password: process.env.PGPASSWORD,
   port: Number(process.env.PGPORT || 5432),
-  ssl: process.env.PGHOST && !String(process.env.PGHOST).includes("localhost")
-    ? { rejectUnauthorized: false }
-    : false
+  ssl:
+    process.env.PGHOST && !String(process.env.PGHOST).includes("localhost")
+      ? { rejectUnauthorized: false }
+      : false
 });
 
 function getShopifyStore() {
@@ -157,7 +158,9 @@ function looksLikeOrderQuery(message) {
   if (/\border\b/.test(text)) return true;
   if (/\bstatus\b/.test(text) && /#?\d{4,}/.test(text)) return true;
   if (/#\d{4,}/.test(text)) return true;
-  if (/\b\d{4,}\b/.test(text) && /\b(check|find|lookup|track|status|where)\b/.test(text)) return true;
+  if (/\b\d{4,}\b/.test(text) && /\b(check|find|lookup|track|status|where)\b/.test(text)) {
+    return true;
+  }
 
   return false;
 }
@@ -234,13 +237,8 @@ function applyBudgetFilter(products, message) {
     const price = Number(p.price);
     if (Number.isNaN(price)) return false;
 
-    if (budget.type === "max") {
-      return price <= budget.value;
-    }
-
-    if (budget.type === "range") {
-      return price >= budget.min && price <= budget.max;
-    }
+    if (budget.type === "max") return price <= budget.value;
+    if (budget.type === "range") return price >= budget.min && price <= budget.max;
 
     return true;
   });
@@ -264,6 +262,7 @@ function detectBrand(message) {
     "sns",
     "notpolish"
   ];
+
   return brands.find((b) => text.includes(b)) || null;
 }
 
@@ -302,7 +301,6 @@ function detectColorFamily(message) {
 
 function detectProfessionalIntent(message) {
   const text = String(message || "").toLowerCase();
-
   const proWords = [
     "salon",
     "technician",
@@ -316,6 +314,23 @@ function detectProfessionalIntent(message) {
   ];
 
   return proWords.some((w) => text.includes(w));
+}
+
+function extractSearchKeywords(message) {
+  const text = String(message || "").toLowerCase();
+
+  const stopWords = [
+    "find", "show", "need", "want", "looking", "for",
+    "i", "me", "my", "the", "a", "an", "please",
+    "under", "below", "cheap", "best", "good", "option",
+    "can", "you", "help", "with", "use"
+  ];
+
+  return text
+    .replace(/[^\w\s]/g, " ")
+    .split(/\s+/)
+    .filter((w) => w.length > 2 && !stopWords.includes(w))
+    .slice(0, 6);
 }
 
 function scoreProductMatch(product, message) {
@@ -383,22 +398,43 @@ function getBundleSuggestions(message, bestProduct) {
   return [];
 }
 
+function buildPopularityHint(product, message) {
+  const title = String(product?.title || "").toLowerCase();
+  const brand = detectBrand(message);
+
+  if (brand && title.includes(brand)) {
+    return " This is a strong match for the brand you asked for.";
+  }
+
+  if (product?.inventory !== null && product?.inventory !== undefined && Number(product.inventory) > 20) {
+    return " This one is well stocked and a solid choice if you want something ready to ship.";
+  }
+
+  return "";
+}
+
 function buildSalesClosing(message, products) {
   const best = products?.[0];
   if (!best) return "";
 
   const bundle = getBundleSuggestions(message, best);
   const isPro = detectProfessionalIntent(message);
+  const popularityHint = buildPopularityHint(best, message);
+
+  let closing = popularityHint;
 
   if (bundle.length && isPro) {
-    return ` If you're buying for salon use, I can also show the matching ${bundle.join(", ")} to complete the set.`;
+    closing += ` If you're buying for salon use, I can also show the matching ${bundle.join(", ")} to complete the set.`;
+    return closing;
   }
 
   if (bundle.length) {
-    return ` I can also show matching ${bundle.join(" and ")} if you want the full set.`;
+    closing += ` I can also show matching ${bundle.join(" and ")} if you want the full set.`;
+    return closing;
   }
 
-  return " If you want, I can also show similar options, best sellers, or the best value choice.";
+  closing += " If you want, I can also show similar options, best sellers, or the best value choice.";
+  return closing;
 }
 
 function buildBetterFollowUp(message, products) {
@@ -411,7 +447,7 @@ function buildBetterFollowUp(message, products) {
     return "Do you want gel, dip, acrylic, or regular polish?";
   }
 
-  if (!color) {
+  if (!color && ["gel", "dip", "polish"].includes(type)) {
     return "Do you want a nude, pink, red, glitter, pastel, or another color family?";
   }
 
@@ -420,14 +456,14 @@ function buildBetterFollowUp(message, products) {
   }
 
   if (products.length > 1) {
-    return "Would you like the best value option, the closest match, or the top 3 to compare?";
+    return "Would you like the closest match, the best value option, or the top 3 to compare?";
   }
 
   if (brand) {
     return `Would you like me to show more ${brand.toUpperCase()} options like this one?`;
   }
 
-  return "Would you like me to show similar options or matching add-ons?";
+  return "Would you like similar options or matching add-ons too?";
 }
 
 function buildBeautySalesReplyV2(products, originalMessage) {
@@ -494,7 +530,7 @@ function buildSmartOrderReply(order, originalMessage) {
     reply += ` I also included a tracking link below.`;
   }
 
-  reply += ` Let me know if you want help with shipping, delivery timing, or finding another product while you wait.`;
+  reply += " Let me know if you want help with shipping, delivery timing, or finding another product while you wait.";
 
   return reply;
 }
@@ -544,7 +580,7 @@ async function searchShopifyProducts(searchText) {
 
   const graphqlQuery = `
     query SearchProducts($query: String!) {
-      products(first: 10, query: $query) {
+      products(first: 12, query: $query) {
         edges {
           node {
             id
@@ -838,9 +874,7 @@ async function syncAllProductsFromShopify(batchSize = 250, maxPages = 500) {
 
     console.log(`Synced page ${pages}, batch ${products.length}, total ${totalSynced}`);
 
-    if (!products.length) {
-      break;
-    }
+    if (!products.length) break;
   }
 
   return {
@@ -852,11 +886,10 @@ async function syncAllProductsFromShopify(batchSize = 250, maxPages = 500) {
 }
 
 async function searchProductsFromDb(searchText) {
-  const cleaned = String(searchText || "").trim();
-  if (!cleaned) return [];
+  const keywords = extractSearchKeywords(searchText);
+  if (!keywords.length) return [];
 
-  const exact = cleaned.toLowerCase();
-  const like = `%${exact}%`;
+  const likeTerms = keywords.map((k) => `%${k}%`);
 
   const result = await pool.query(
     `
@@ -874,23 +907,23 @@ async function searchProductsFromDb(searchText) {
       v.inventory,
       CASE
         WHEN LOWER(COALESCE(v.sku, '')) = $1 THEN 100
-        WHEN LOWER(COALESCE(v.sku, '')) LIKE $2 THEN 80
-        WHEN LOWER(COALESCE(p.title, '')) LIKE $2 THEN 60
-        WHEN LOWER(COALESCE(v.title, '')) LIKE $2 THEN 40
-        WHEN LOWER(COALESCE(p.vendor, '')) LIKE $2 THEN 20
+        WHEN LOWER(COALESCE(v.sku, '')) LIKE ANY($2) THEN 80
+        WHEN LOWER(COALESCE(p.title, '')) LIKE ANY($2) THEN 60
+        WHEN LOWER(COALESCE(v.title, '')) LIKE ANY($2) THEN 40
+        WHEN LOWER(COALESCE(p.vendor, '')) LIKE ANY($2) THEN 20
         ELSE 0
       END AS score
     FROM products p
     LEFT JOIN variants v ON v.product_id = p.id
     WHERE
-      LOWER(COALESCE(p.title, '')) LIKE $2
-      OR LOWER(COALESCE(v.sku, '')) LIKE $2
-      OR LOWER(COALESCE(v.title, '')) LIKE $2
-      OR LOWER(COALESCE(p.vendor, '')) LIKE $2
+      LOWER(COALESCE(p.title, '')) LIKE ANY($2)
+      OR LOWER(COALESCE(v.title, '')) LIKE ANY($2)
+      OR LOWER(COALESCE(v.sku, '')) LIKE ANY($2)
+      OR LOWER(COALESCE(p.vendor, '')) LIKE ANY($2)
     ORDER BY score DESC, COALESCE(v.inventory, 0) DESC, p.title ASC
-    LIMIT 10
+    LIMIT 12
     `,
-    [exact, like]
+    [keywords[0], likeTerms]
   );
 
   return result.rows.map((row) => ({
