@@ -483,7 +483,11 @@ async function startServer() {
     console.log("Starting app...");
     console.log("PORT =", PORT);
 
-    await initDb();
+    try {
+  await initDb();
+} catch (e) {
+  console.log("Database not ready, continuing without DB");
+}
 
     app.listen(PORT, "0.0.0.0", () => {
       console.log(`Listening on ${PORT}`);
