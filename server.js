@@ -183,6 +183,14 @@ function extractEmail(message) {
   return match ? match[0].toLowerCase() : null;
 }
 
+function looksLikeOnlyEmail(message) {
+  const email = extractEmail(message);
+  if (!email) return false;
+
+  const cleaned = String(message || "").replace(email, "").trim();
+  return cleaned.length === 0;
+}
+
 function formatMoney(price) {
   if (price === null || price === undefined || price === "") return "";
   const num = Number(price);
@@ -242,41 +250,157 @@ function applyBudgetFilter(products, message) {
   });
 }
 
-function buildSmartProductReply(products, originalMessage) {
-  if (!products || !products.length) {
-    return `I couldn’t find an exact match for "${originalMessage}", but I can help you narrow it down. Try sending the brand, color, SKU, product type, or budget you want.`;
+function detectBrand(message) {
+  const text = String(message || "").toLowerCase();
+  const brands = [
+    "opi",
+    "kiara sky",
+    "dnd",
+    "gelish",
+    "cnd",
+    "essie",
+    "chaun legend",
+    "chaun",
+    "cre8tion",
+    "lechat",
+    "apres",
+    "kupa",
+    "sns",
+    "notpolish"
+  ];
+  return brands.find((b) => text.includes(b)) || null;
+}
+
+function detectProductType(message) {
+  const text = String(message || "").toLowerCase();
+
+  if (text.includes("dip powder")) return "dip";
+  if (text.includes("dipping powder")) return "dip";
+  if (text.includes("dip")) return "dip";
+  if (text.includes("gel polish")) return "gel";
+  if (text.includes("gel color")) return "gel";
+  if (text.includes("builder gel")) return "gel";
+  if (text.includes("gel")) return "gel";
+  if (text.includes("acrylic")) return "acrylic";
+  if (text.includes("polish")) return "polish";
+  if (text.includes("top coat")) return "top coat";
+  if (text.includes("base coat")) return "base coat";
+  if (text.includes("primer")) return "primer";
+  if (text.includes("monomer")) return "monomer";
+  if (text.includes("brush")) return "brush";
+
+  return null;
+}
+
+function detectColorFamily(message) {
+  const text = String(message || "").toLowerCase();
+  const colors = [
+    "nude", "pink", "red", "white", "black", "blue", "purple",
+    "orange", "brown", "beige", "glitter", "pastel", "neon",
+    "coral", "peach", "lavender", "clear", "green", "yellow",
+    "silver", "gold", "gray", "grey"
+  ];
+
+  return colors.find((c) => text.includes(c)) || null;
+}
+
+function scoreProductMatch(product, message) {
+  const text = String(message || "").toLowerCase();
+  let score = 0;
+
+  const title = String(product.title || "").toLowerCase();
+  const vendor = String(product.vendor || "").toLowerCase();
+  const type = String(product.product_type || "").toLowerCase();
+  const sku = String(product.sku || "").toLowerCase();
+  const variantTitle = String(product.variant_title || "").toLowerCase();
+
+  const brand = detectBrand(message);
+  const productType = detectProductType(message);
+  const color = detectColorFamily(message);
+
+  if (sku && text.includes(sku)) score += 120;
+
+  if (brand && vendor.includes(brand)) score += 40;
+  if (brand && title.includes(brand)) score += 25;
+
+  if (productType && (title.includes(productType) || type.includes(productType) || variantTitle.includes(productType))) {
+    score += 30;
   }
 
-  const best = products[0];
-  const alternatives = products.slice(1, 3);
+  if (color && (title.includes(color) || variantTitle.includes(color))) {
+    score += 25;
+  }
 
-  let intro = `I found ${products.length === 1 ? "a good option" : "some good options"} for you. `;
-  let bestLine = `My best match is ${best.title}`;
+  if (title.includes(text)) score += 20;
 
-  if (best.price) {
-    bestLine += ` at ${formatMoney(best.price)}`;
+  if (product.inventory !== null && product.inventory !== undefined) {
+    if (Number(product.inventory) > 0) score += 10;
+    if (Number(product.inventory) <= 5 && Number(product.inventory) > 0) score += 4;
+  }
+
+  return score;
+}
+
+function rankProducts(products, message) {
+  return [...products].sort((a, b) => scoreProductMatch(b, message) - scoreProductMatch(a, message));
+}
+
+function buildSalesFollowUp(message, products) {
+  const brand = detectBrand(message);
+  const type = detectProductType(message);
+  const color = detectColorFamily(message);
+
+  if (!type) return "Do you want gel, dip, acrylic, or regular polish?";
+  if (!color && type) return "Do you want a nude, pink, red, glitter, or another color family?";
+  if (products.length > 1) return "Would you like the best value option, the best match, or the top 3 to compare?";
+  if (brand) return `Would you like me to show more ${brand.toUpperCase()} options like this one?`;
+
+  return "Would you like me to show matching items or similar alternatives?";
+}
+
+function buildBeautySalesReply(products, originalMessage) {
+  if (!products || !products.length) {
+    const brand = detectBrand(originalMessage);
+    const type = detectProductType(originalMessage);
+
+    if (!brand && !type) {
+      return "I can help with that. Send me the brand, product type, color, SKU, or budget you want, and I’ll narrow it down for you.";
+    }
+
+    return `I couldn’t find an exact match for "${originalMessage}", but I can help you narrow it down. Try adding the color, SKU, or budget you want.`;
+  }
+
+  const ranked = rankProducts(products, originalMessage);
+  const best = ranked[0];
+  const alternatives = ranked.slice(1, 3);
+
+  const bestPrice = best.price ? formatMoney(best.price) : null;
+  const lowStock = best.inventory !== null && best.inventory !== undefined && Number(best.inventory) > 0 && Number(best.inventory) <= 5;
+
+  let reply = `I found ${ranked.length === 1 ? "a strong option" : "some strong options"} for you. `;
+  reply += `My best match is ${best.title}`;
+
+  if (bestPrice) {
+    reply += ` at ${bestPrice}`;
   }
 
   if (best.inventory !== null && best.inventory !== undefined) {
     if (Number(best.inventory) > 0) {
-      bestLine += isLowStock(best.inventory)
-        ? `, and it’s low in stock right now`
-        : `, and it’s available now`;
+      reply += lowStock ? `, and it’s low in stock right now` : `, and it’s in stock now`;
     } else {
-      bestLine += `, but it looks out of stock`;
+      reply += `, but it looks out of stock`;
     }
   }
 
-  bestLine += ".";
+  reply += ".";
 
-  let altLine = "";
   if (alternatives.length) {
-    altLine = ` I also found ${alternatives.length === 1 ? "1 close alternative" : `${alternatives.length} close alternatives`} if you want to compare.`;
+    reply += ` I also found ${alternatives.length === 1 ? "1 close alternative" : `${alternatives.length} close alternatives`} if you want to compare.`;
   }
 
-  let closeLine = ` Would you like me to show the best option only, or compare the top ${Math.min(products.length, 3)} choices?`;
+  reply += ` ${buildSalesFollowUp(originalMessage, ranked)}`;
 
-  return `${intro}${bestLine}${altLine}${closeLine}`;
+  return reply;
 }
 
 function buildSmartOrderLookupPrompt() {
@@ -764,6 +888,13 @@ app.post("/api/chat", async (req, res) => {
       return res.status(400).json({ error: "Message is required" });
     }
 
+    if (looksLikeOnlyEmail(message)) {
+      return res.status(200).json({
+        reply: "Please include your order number with your email so I can check the order. Example: order 12345 john@email.com",
+        type: "order_lookup"
+      });
+    }
+
     if (looksLikeOrderQuery(message)) {
       const orderNumber = extractOrderNumber(message);
       const email = extractEmail(message);
@@ -798,15 +929,16 @@ app.post("/api/chat", async (req, res) => {
     }
 
     products = applyBudgetFilter(products, message);
+    products = rankProducts(products, message);
 
-    res.status(200).json({
-      reply: buildSmartProductReply(products, message),
+    return res.status(200).json({
+      reply: buildBeautySalesReply(products, message),
       type: "product",
       products
     });
   } catch (error) {
     console.error("CHAT ERROR:", error);
-    res.status(500).json({
+    return res.status(500).json({
       error: "Server error",
       detail: error.message
     });
