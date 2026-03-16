@@ -5,8 +5,18 @@ const app = express();
 
 app.use(express.json());
 
+const allowedOrigins = [
+  "http://localhost:3000",
+  "https://samnail-ai-production.up.railway.app"
+];
+
 app.use(cors({
-  origin: ["null", "http://localhost:3000", "https://samnail-ai-production.up.railway.app"],
+  origin: function (origin, callback) {
+    if (!origin || origin === "null" || allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+    return callback(new Error("Not allowed by CORS"));
+  },
   methods: ["GET", "POST", "OPTIONS"],
   allowedHeaders: ["Content-Type"]
 }));
@@ -28,19 +38,29 @@ app.get("/ping", (req, res) => {
   res.status(200).send("pong");
 });
 
+function escapeShopifySearch(text) {
+  return String(text || "")
+    .trim()
+    .replace(/["\\]/g, " ")
+    .replace(/\s+/g, " ");
+}
+
 async function searchShopifyProducts(searchText) {
-  const store = process.env.SHOPIFY_STORE;
+  const store =
+    process.env.SHOPIFY_STORE_DOMAIN || process.env.SHOPIFY_STORE;
   const token = process.env.SHOPIFY_ACCESS_TOKEN;
 
   if (!store || !token) {
-    throw new Error("Missing SHOPIFY_STORE or SHOPIFY_ACCESS_TOKEN");
+    throw new Error("Missing SHOPIFY_STORE_DOMAIN (or SHOPIFY_STORE) or SHOPIFY_ACCESS_TOKEN");
   }
 
-  // Simple Shopify Admin GraphQL search string
-  const cleaned = String(searchText || "").trim();
-  const queryString = cleaned
-    ? `title:*${cleaned}* OR tag:*${cleaned}* OR product_type:*${cleaned}*`
-    : "";
+  const cleaned = escapeShopifySearch(searchText);
+
+  if (!cleaned) {
+    return [];
+  }
+
+  const queryString = `title:*${cleaned}* OR tag:*${cleaned}* OR product_type:*${cleaned}*`;
 
   const graphqlQuery = `
     query SearchProducts($query: String!) {
@@ -80,20 +100,28 @@ async function searchShopifyProducts(searchText) {
     })
   });
 
+  const rawText = await response.text();
+
   if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`Shopify GraphQL error ${response.status}: ${text}`);
+    throw new Error(`Shopify GraphQL error ${response.status}: ${rawText}`);
   }
 
-  const result = await response.json();
+  let result;
+  try {
+    result = JSON.parse(rawText);
+  } catch {
+    throw new Error(`Invalid JSON from Shopify: ${rawText}`);
+  }
 
   if (result.errors) {
-    throw new Error(JSON.stringify(result.errors));
+    throw new Error(`Shopify GraphQL returned errors: ${JSON.stringify(result.errors)}`);
   }
 
-  return result.data.products.edges.map(edge => {
+  const edges = result?.data?.products?.edges || [];
+
+  return edges.map((edge) => {
     const p = edge.node;
-    const firstVariant = p.variants?.edges?.[0]?.node || null;
+    const firstVariant = p?.variants?.edges?.[0]?.node || null;
 
     return {
       id: p.id,
