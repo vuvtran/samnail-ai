@@ -90,10 +90,15 @@
       border-bottom-left-radius: 4px;
     }
 
+    .error {
+      align-items: flex-start;
+    }
+
     .error .bubble {
       background: #fef2f2;
       color: #991b1b;
       border: 1px solid #fecaca;
+      border-bottom-left-radius: 4px;
     }
 
     .products-wrap {
@@ -122,8 +127,18 @@
       flex-shrink: 0;
     }
 
+    .product-image-placeholder {
+      width: 72px;
+      height: 72px;
+      border-radius: 10px;
+      border: 1px solid #e5e7eb;
+      background: #f3f4f6;
+      flex-shrink: 0;
+    }
+
     .product-info {
       min-width: 0;
+      flex: 1;
     }
 
     .product-title {
@@ -132,6 +147,7 @@
       color: #111827;
       text-decoration: none;
       margin-bottom: 4px;
+      line-height: 1.4;
     }
 
     .product-title:hover {
@@ -142,12 +158,14 @@
       font-size: 14px;
       color: #4b5563;
       margin-bottom: 3px;
+      line-height: 1.4;
     }
 
     .product-price {
       font-size: 15px;
       font-weight: 700;
       color: #059669;
+      margin-top: 4px;
     }
 
     .footer {
@@ -221,7 +239,8 @@
         align-items: flex-start;
       }
 
-      .product-card img {
+      .product-card img,
+      .product-image-placeholder {
         width: 60px;
         height: 60px;
       }
@@ -236,7 +255,7 @@
   <div class="app">
     <div class="header">
       <h2>SamNail AI Assistant</h2>
-      <p>Ask about nail products, dip powder, acrylic, gel, and more.</p>
+      <p>Ask about nail products, dip powder, acrylic, gel, SKU, and stock.</p>
     </div>
 
     <div id="chat">
@@ -247,6 +266,8 @@
           • nude dip powder
           <br>
           • Kiara Sky D431
+          <br>
+          • BL 3005
           <br>
           • pink acrylic powder
         </div>
@@ -304,14 +325,25 @@
         const safeTitle = escapeHtml(p.title || "Untitled product");
         const safeVendor = escapeHtml(p.vendor || "");
         const safeType = escapeHtml(p.product_type || "");
+        const safeVariant = escapeHtml(p.variant_title || "");
+        const safeSku = escapeHtml(p.sku || "");
         const safePrice = p.price ? `$${escapeHtml(String(p.price))}` : "";
+        const safeStock = p.inventory !== null && p.inventory !== undefined
+          ? escapeHtml(String(p.inventory))
+          : "";
         const safeUrl = p.url || "#";
         const safeImage = p.image || "";
 
         card.innerHTML = `
-          ${safeImage ? `<img src="${safeImage}" alt="${safeTitle}">` : ""}
+          ${safeImage
+            ? `<img src="${safeImage}" alt="${safeTitle}" loading="lazy">`
+            : `<div class="product-image-placeholder"></div>`
+          }
           <div class="product-info">
             <a class="product-title" href="${safeUrl}" target="_blank" rel="noopener noreferrer">${safeTitle}</a>
+            ${safeVariant ? `<div class="product-meta">Variant: ${safeVariant}</div>` : ""}
+            ${safeSku ? `<div class="product-meta">SKU: ${safeSku}</div>` : ""}
+            ${safeStock !== "" ? `<div class="product-meta">Stock: ${safeStock}</div>` : ""}
             ${safeVendor ? `<div class="product-meta">Brand: ${safeVendor}</div>` : ""}
             ${safeType ? `<div class="product-meta">Type: ${safeType}</div>` : ""}
             ${safePrice ? `<div class="product-price">${safePrice}</div>` : ""}
@@ -326,11 +358,17 @@
     }
 
     function addTyping() {
+      removeTyping();
+
       const typing = document.createElement("div");
       typing.className = "message ai";
       typing.id = "typing";
 
-      typing.innerHTML = `<div class="typing">AI is searching products...</div>`;
+      const bubble = document.createElement("div");
+      bubble.className = "bubble";
+      bubble.textContent = "AI is searching products...";
+
+      typing.appendChild(bubble);
       chat.appendChild(typing);
       chat.scrollTop = chat.scrollHeight;
     }
