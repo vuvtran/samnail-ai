@@ -35,10 +35,18 @@ const pool = new Pool({
   database: process.env.PGDATABASE,
   password: process.env.PGPASSWORD,
   port: Number(process.env.PGPORT || 5432),
-  ssl: process.env.PGHOST && process.env.PGHOST !== "localhost"
+  ssl: process.env.PGHOST && !String(process.env.PGHOST).includes("localhost")
     ? { rejectUnauthorized: false }
     : false
 });
+
+function getShopifyStore() {
+  return process.env.SHOPIFY_STORE_DOMAIN || process.env.SHOPIFY_STORE;
+}
+
+function getShopifyToken() {
+  return process.env.SHOPIFY_ACCESS_TOKEN;
+}
 
 async function initDb() {
   await pool.query(`
@@ -71,6 +79,10 @@ async function initDb() {
   `);
 
   await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_products_vendor ON products USING btree (vendor);
+  `);
+
+  await pool.query(`
     CREATE INDEX IF NOT EXISTS idx_variants_sku ON variants USING btree (sku);
   `);
 
@@ -88,9 +100,13 @@ app.get("/", (req, res) => {
 app.get("/health", async (req, res) => {
   try {
     await pool.query("SELECT 1");
-    res.status(200).json({ status: "ok" });
+    res.status(200).json({ status: "ok", db: "connected" });
   } catch (error) {
-    res.status(500).json({ status: "db_error", detail: error.message });
+    res.status(200).json({
+      status: "ok",
+      db: "disconnected",
+      detail: error.message || "Database not connected"
+    });
   }
 });
 
@@ -125,8 +141,8 @@ function scoreVariantMatch(variant, searchText) {
   const title = String(variant?.title || "").toLowerCase();
 
   let score = 0;
-
   if (!q) return score;
+
   if (sku === q) score += 100;
   if (sku.includes(q)) score += 60;
   if (title.includes(q)) score += 30;
@@ -134,14 +150,44 @@ function scoreVariantMatch(variant, searchText) {
   return score;
 }
 
-async function searchShopifyProducts(searchText) {
-  const store = process.env.SHOPIFY_STORE_DOMAIN || process.env.SHOPIFY_STORE;
-  const token = process.env.SHOPIFY_ACCESS_TOKEN;
+async function shopifyGraphQL(query, variables = {}) {
+  const store = getShopifyStore();
+  const token = getShopifyToken();
 
   if (!store || !token) {
-    throw new Error("Missing SHOPIFY_STORE_DOMAIN (or SHOPIFY_STORE) or SHOPIFY_ACCESS_TOKEN");
+    throw new Error("Missing SHOPIFY_STORE (or SHOPIFY_STORE_DOMAIN) or SHOPIFY_ACCESS_TOKEN");
   }
 
+  const response = await fetch(`https://${store}/admin/api/2025-10/graphql.json`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Shopify-Access-Token": token
+    },
+    body: JSON.stringify({ query, variables })
+  });
+
+  const rawText = await response.text();
+
+  if (!response.ok) {
+    throw new Error(`Shopify GraphQL error ${response.status}: ${rawText}`);
+  }
+
+  let result;
+  try {
+    result = JSON.parse(rawText);
+  } catch {
+    throw new Error(`Invalid JSON from Shopify: ${rawText}`);
+  }
+
+  if (result.errors) {
+    throw new Error(`Shopify GraphQL returned errors: ${JSON.stringify(result.errors)}`);
+  }
+
+  return result;
+}
+
+async function searchShopifyProducts(searchText) {
   const cleaned = escapeShopifySearch(searchText);
   if (!cleaned) return [];
 
@@ -178,35 +224,7 @@ async function searchShopifyProducts(searchText) {
     }
   `;
 
-  const response = await fetch(`https://${store}/admin/api/2025-10/graphql.json`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Shopify-Access-Token": token
-    },
-    body: JSON.stringify({
-      query: graphqlQuery,
-      variables: { query: queryString }
-    })
-  });
-
-  const rawText = await response.text();
-
-  if (!response.ok) {
-    throw new Error(`Shopify GraphQL error ${response.status}: ${rawText}`);
-  }
-
-  let result;
-  try {
-    result = JSON.parse(rawText);
-  } catch {
-    throw new Error(`Invalid JSON from Shopify: ${rawText}`);
-  }
-
-  if (result.errors) {
-    throw new Error(`Shopify GraphQL returned errors: ${JSON.stringify(result.errors)}`);
-  }
-
+  const result = await shopifyGraphQL(graphqlQuery, { query: queryString });
   const edges = result?.data?.products?.edges || [];
 
   return edges.map((edge) => {
@@ -294,17 +312,14 @@ async function upsertProductAndVariants(product) {
   }
 }
 
-async function syncProductsFromShopify(limit = 50) {
-  const store = process.env.SHOPIFY_STORE_DOMAIN || process.env.SHOPIFY_STORE;
-  const token = process.env.SHOPIFY_ACCESS_TOKEN;
-
-  if (!store || !token) {
-    throw new Error("Missing SHOPIFY_STORE_DOMAIN (or SHOPIFY_STORE) or SHOPIFY_ACCESS_TOKEN");
-  }
-
+async function fetchShopifyProductsPage(limit = 50, afterCursor = null) {
   const graphqlQuery = `
-    query SyncProducts {
-      products(first: ${limit}) {
+    query FetchProductsPage($first: Int!, $after: String) {
+      products(first: $first, after: $after) {
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
         edges {
           node {
             id
@@ -333,28 +348,57 @@ async function syncProductsFromShopify(limit = 50) {
     }
   `;
 
-  const response = await fetch(`https://${store}/admin/api/2025-10/graphql.json`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Shopify-Access-Token": token
-    },
-    body: JSON.stringify({ query: graphqlQuery })
+  const result = await shopifyGraphQL(graphqlQuery, {
+    first: limit,
+    after: afterCursor
   });
 
-  const result = await response.json();
+  return result?.data?.products || { pageInfo: { hasNextPage: false, endCursor: null }, edges: [] };
+}
 
-  if (!response.ok || result.errors) {
-    throw new Error(JSON.stringify(result.errors || result));
-  }
-
-  const products = result?.data?.products?.edges || [];
+async function syncProductsFromShopify(limit = 50) {
+  const page = await fetchShopifyProductsPage(limit, null);
+  const products = page.edges || [];
 
   for (const edge of products) {
     await upsertProductAndVariants(edge.node);
   }
 
   return { synced_products: products.length };
+}
+
+async function syncAllProductsFromShopify(batchSize = 250, maxPages = 500) {
+  let after = null;
+  let hasNextPage = true;
+  let totalSynced = 0;
+  let pages = 0;
+
+  while (hasNextPage && pages < maxPages) {
+    const page = await fetchShopifyProductsPage(batchSize, after);
+    const products = page.edges || [];
+
+    for (const edge of products) {
+      await upsertProductAndVariants(edge.node);
+      totalSynced += 1;
+    }
+
+    hasNextPage = Boolean(page?.pageInfo?.hasNextPage);
+    after = page?.pageInfo?.endCursor || null;
+    pages += 1;
+
+    console.log(`Synced page ${pages}, batch ${products.length}, total ${totalSynced}`);
+
+    if (!products.length) {
+      break;
+    }
+  }
+
+  return {
+    success: true,
+    synced_products: totalSynced,
+    pages_processed: pages,
+    has_more: hasNextPage
+  };
 }
 
 async function searchProductsFromDb(searchText) {
@@ -432,7 +476,7 @@ function formatReply(products, originalMessage) {
 
 app.get("/sync/products", async (req, res) => {
   try {
-    const limit = Number(req.query.limit || 50);
+    const limit = Math.min(Number(req.query.limit || 50), 250);
     const result = await syncProductsFromShopify(limit);
 
     res.status(200).json({
@@ -448,6 +492,22 @@ app.get("/sync/products", async (req, res) => {
   }
 });
 
+app.get("/sync/products/all", async (req, res) => {
+  try {
+    const batchSize = Math.min(Number(req.query.batch || 250), 250);
+    const maxPages = Number(req.query.max_pages || 500);
+
+    const result = await syncAllProductsFromShopify(batchSize, maxPages);
+    res.status(200).json(result);
+  } catch (error) {
+    console.error("SYNC ALL PRODUCTS ERROR:", error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
 app.post("/api/chat", async (req, res) => {
   try {
     const { message } = req.body || {};
@@ -456,7 +516,13 @@ app.post("/api/chat", async (req, res) => {
       return res.status(400).json({ error: "Message is required" });
     }
 
-    let products = await searchProductsFromDb(message);
+    let products = [];
+
+    try {
+      products = await searchProductsFromDb(message);
+    } catch (dbError) {
+      console.error("DB SEARCH ERROR:", dbError.message);
+    }
 
     if (!products.length) {
       console.log("DB returned no results, falling back to Shopify live search");
@@ -479,19 +545,19 @@ app.post("/api/chat", async (req, res) => {
 const PORT = process.env.PORT || 3000;
 
 async function startServer() {
-  try {
-    console.log("Starting app...");
-    console.log("PORT =", PORT);
+  console.log("Starting app...");
+  console.log("PORT =", PORT);
 
-    await initDb();
+  app.listen(PORT, "0.0.0.0", async () => {
+    console.log(`Listening on ${PORT}`);
 
-    app.listen(PORT, "0.0.0.0", () => {
-      console.log(`Listening on ${PORT}`);
-    });
-  } catch (error) {
-    console.error("STARTUP ERROR:", error);
-    process.exit(1);
-  }
+    try {
+      await initDb();
+      console.log("Database ready");
+    } catch (error) {
+      console.error("Database init skipped:", error.message);
+    }
+  });
 }
 
 startServer();
