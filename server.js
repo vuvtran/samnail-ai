@@ -154,7 +154,6 @@ function looksLikeOrderQuery(message) {
   const text = String(message || "").toLowerCase().trim();
 
   if (!text) return false;
-
   if (/\border\b/.test(text)) return true;
   if (/\bstatus\b/.test(text) && /#?\d{4,}/.test(text)) return true;
   if (/#\d{4,}/.test(text)) return true;
@@ -176,6 +175,12 @@ function extractOrderNumber(message) {
   if (anyNumberMatch) return anyNumberMatch[1];
 
   return null;
+}
+
+function extractEmail(message) {
+  const text = String(message || "");
+  const match = text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+  return match ? match[0].toLowerCase() : null;
 }
 
 async function shopifyGraphQL(query, variables = {}) {
@@ -289,12 +294,12 @@ async function searchShopifyProducts(searchText) {
   });
 }
 
-async function searchShopifyOrderByNumber(orderNumber) {
-  if (!orderNumber) return null;
+async function searchShopifyOrderByNumberAndEmail(orderNumber, email) {
+  if (!orderNumber || !email) return null;
 
   const graphqlQuery = `
     query SearchOrders($query: String!) {
-      orders(first: 5, query: $query, sortKey: PROCESSED_AT, reverse: true) {
+      orders(first: 10, query: $query, sortKey: PROCESSED_AT, reverse: true) {
         edges {
           node {
             id
@@ -345,36 +350,43 @@ async function searchShopifyOrderByNumber(orderNumber) {
   for (const q of queriesToTry) {
     const result = await shopifyGraphQL(graphqlQuery, { query: q });
     const edges = result?.data?.orders?.edges || [];
-    if (!edges.length) continue;
 
-    const order = edges[0].node;
-    const customerName = [
-      order?.customer?.firstName || "",
-      order?.customer?.lastName || ""
-    ].join(" ").trim();
+    for (const edge of edges) {
+      const order = edge.node;
+      const orderEmail = String(order?.customer?.email || "").toLowerCase().trim();
 
-    const tracking = order?.fulfillments?.[0]?.trackingInfo?.[0] || null;
+      if (orderEmail !== String(email).toLowerCase().trim()) {
+        continue;
+      }
 
-    return {
-      type: "order",
-      id: order.id,
-      order_number: order.name,
-      financial_status: order.displayFinancialStatus || null,
-      fulfillment_status: order.displayFulfillmentStatus || null,
-      total_amount: order?.totalPriceSet?.shopMoney?.amount || null,
-      currency: order?.totalPriceSet?.shopMoney?.currencyCode || null,
-      created_at: order.createdAt || null,
-      customer_name: customerName || null,
-      customer_email: order?.customer?.email || null,
-      customer_phone: order?.customer?.phone || null,
-      tracking_company: tracking?.company || null,
-      tracking_number: tracking?.number || null,
-      tracking_url: tracking?.url || null,
-      line_items: (order?.lineItems?.edges || []).map((edge) => ({
-        title: edge.node.title,
-        quantity: edge.node.quantity
-      }))
-    };
+      const customerName = [
+        order?.customer?.firstName || "",
+        order?.customer?.lastName || ""
+      ].join(" ").trim();
+
+      const tracking = order?.fulfillments?.[0]?.trackingInfo?.[0] || null;
+
+      return {
+        type: "order",
+        id: order.id,
+        order_number: order.name,
+        financial_status: order.displayFinancialStatus || null,
+        fulfillment_status: order.displayFulfillmentStatus || null,
+        total_amount: order?.totalPriceSet?.shopMoney?.amount || null,
+        currency: order?.totalPriceSet?.shopMoney?.currencyCode || null,
+        created_at: order.createdAt || null,
+        customer_name: customerName || null,
+        customer_email: order?.customer?.email || null,
+        customer_phone: order?.customer?.phone || null,
+        tracking_company: tracking?.company || null,
+        tracking_number: tracking?.number || null,
+        tracking_url: tracking?.url || null,
+        line_items: (order?.lineItems?.edges || []).map((itemEdge) => ({
+          title: itemEdge.node.title,
+          quantity: itemEdge.node.quantity
+        }))
+      };
+    }
   }
 
   return null;
@@ -597,7 +609,7 @@ function formatReply(products, originalMessage) {
 
 function formatOrderReply(order, originalMessage) {
   if (!order) {
-    return `I could not find an order matching "${originalMessage}".`;
+    return `I could not find an order matching "${originalMessage}". Please double-check your order number and email address.`;
   }
 
   const lines = [
@@ -659,15 +671,16 @@ app.post("/api/chat", async (req, res) => {
 
     if (looksLikeOrderQuery(message)) {
       const orderNumber = extractOrderNumber(message);
+      const email = extractEmail(message);
 
-      if (!orderNumber) {
+      if (!orderNumber || !email) {
         return res.status(200).json({
-          reply: "Please provide an order number, for example: order 12345",
+          reply: "Please provide both your order number and email address. Example: order 12345 john@email.com",
           type: "order_lookup"
         });
       }
 
-      const order = await searchShopifyOrderByNumber(orderNumber);
+      const order = await searchShopifyOrderByNumberAndEmail(orderNumber, email);
 
       return res.status(200).json({
         reply: formatOrderReply(order, message),
