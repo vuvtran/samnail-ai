@@ -150,6 +150,34 @@ function scoreVariantMatch(variant, searchText) {
   return score;
 }
 
+function looksLikeOrderQuery(message) {
+  const text = String(message || "").toLowerCase().trim();
+
+  if (!text) return false;
+
+  if (/\border\b/.test(text)) return true;
+  if (/\bstatus\b/.test(text) && /#?\d{4,}/.test(text)) return true;
+  if (/#\d{4,}/.test(text)) return true;
+  if (/\b\d{4,}\b/.test(text) && /\b(check|find|lookup|track|status)\b/.test(text)) return true;
+
+  return false;
+}
+
+function extractOrderNumber(message) {
+  const text = String(message || "");
+
+  const hashMatch = text.match(/#(\d{4,})/);
+  if (hashMatch) return hashMatch[1];
+
+  const orderMatch = text.match(/\border\s*#?\s*(\d{4,})/i);
+  if (orderMatch) return orderMatch[1];
+
+  const anyNumberMatch = text.match(/\b(\d{4,})\b/);
+  if (anyNumberMatch) return anyNumberMatch[1];
+
+  return null;
+}
+
 async function shopifyGraphQL(query, variables = {}) {
   const store = getShopifyStore();
   const token = getShopifyToken();
@@ -243,6 +271,7 @@ async function searchShopifyProducts(searchText) {
     }
 
     return {
+      type: "product",
       id: p.id,
       title: p.title,
       handle: p.handle,
@@ -258,6 +287,97 @@ async function searchShopifyProducts(searchText) {
       url: `https://samnailsupply.com/products/${p.handle}`
     };
   });
+}
+
+async function searchShopifyOrderByNumber(orderNumber) {
+  if (!orderNumber) return null;
+
+  const graphqlQuery = `
+    query SearchOrders($query: String!) {
+      orders(first: 5, query: $query, sortKey: PROCESSED_AT, reverse: true) {
+        edges {
+          node {
+            id
+            name
+            displayFinancialStatus
+            displayFulfillmentStatus
+            totalPriceSet {
+              shopMoney {
+                amount
+                currencyCode
+              }
+            }
+            createdAt
+            customer {
+              firstName
+              lastName
+              email
+              phone
+            }
+            fulfillments(first: 5) {
+              trackingInfo {
+                company
+                number
+                url
+              }
+            }
+            lineItems(first: 5) {
+              edges {
+                node {
+                  title
+                  quantity
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  `;
+
+  const queriesToTry = [
+    `name:#${orderNumber}`,
+    `name:${orderNumber}`,
+    `#${orderNumber}`,
+    `${orderNumber}`
+  ];
+
+  for (const q of queriesToTry) {
+    const result = await shopifyGraphQL(graphqlQuery, { query: q });
+    const edges = result?.data?.orders?.edges || [];
+    if (!edges.length) continue;
+
+    const order = edges[0].node;
+    const customerName = [
+      order?.customer?.firstName || "",
+      order?.customer?.lastName || ""
+    ].join(" ").trim();
+
+    const tracking = order?.fulfillments?.[0]?.trackingInfo?.[0] || null;
+
+    return {
+      type: "order",
+      id: order.id,
+      order_number: order.name,
+      financial_status: order.displayFinancialStatus || null,
+      fulfillment_status: order.displayFulfillmentStatus || null,
+      total_amount: order?.totalPriceSet?.shopMoney?.amount || null,
+      currency: order?.totalPriceSet?.shopMoney?.currencyCode || null,
+      created_at: order.createdAt || null,
+      customer_name: customerName || null,
+      customer_email: order?.customer?.email || null,
+      customer_phone: order?.customer?.phone || null,
+      tracking_company: tracking?.company || null,
+      tracking_number: tracking?.number || null,
+      tracking_url: tracking?.url || null,
+      line_items: (order?.lineItems?.edges || []).map((edge) => ({
+        title: edge.node.title,
+        quantity: edge.node.quantity
+      }))
+    };
+  }
+
+  return null;
 }
 
 async function upsertProductAndVariants(product) {
@@ -444,6 +564,7 @@ async function searchProductsFromDb(searchText) {
   );
 
   return result.rows.map((row) => ({
+    type: "product",
     id: row.id,
     title: row.title,
     handle: row.handle,
@@ -472,6 +593,26 @@ function formatReply(products, originalMessage) {
       return `${i + 1}. ${p.title}${priceText}${skuText}${stockText}`;
     })
     .join("\n");
+}
+
+function formatOrderReply(order, originalMessage) {
+  if (!order) {
+    return `I could not find an order matching "${originalMessage}".`;
+  }
+
+  const lines = [
+    `Order ${order.order_number || ""}`,
+    order.customer_name ? `Customer: ${order.customer_name}` : null,
+    order.financial_status ? `Payment: ${order.financial_status}` : null,
+    order.fulfillment_status ? `Fulfillment: ${order.fulfillment_status}` : null,
+    order.total_amount ? `Total: ${order.total_amount} ${order.currency || ""}`.trim() : null,
+    order.created_at ? `Placed: ${new Date(order.created_at).toLocaleString("en-US")}` : null,
+    order.tracking_number ? `Tracking: ${order.tracking_number}` : null,
+    order.tracking_company ? `Carrier: ${order.tracking_company}` : null,
+    order.tracking_url ? `Tracking URL: ${order.tracking_url}` : null
+  ].filter(Boolean);
+
+  return lines.join("\n");
 }
 
 app.get("/sync/products", async (req, res) => {
@@ -516,6 +657,25 @@ app.post("/api/chat", async (req, res) => {
       return res.status(400).json({ error: "Message is required" });
     }
 
+    if (looksLikeOrderQuery(message)) {
+      const orderNumber = extractOrderNumber(message);
+
+      if (!orderNumber) {
+        return res.status(200).json({
+          reply: "Please provide an order number, for example: order 12345",
+          type: "order_lookup"
+        });
+      }
+
+      const order = await searchShopifyOrderByNumber(orderNumber);
+
+      return res.status(200).json({
+        reply: formatOrderReply(order, message),
+        type: "order",
+        order
+      });
+    }
+
     let products = [];
 
     try {
@@ -531,6 +691,7 @@ app.post("/api/chat", async (req, res) => {
 
     res.status(200).json({
       reply: formatReply(products, message),
+      type: "product",
       products
     });
   } catch (error) {
