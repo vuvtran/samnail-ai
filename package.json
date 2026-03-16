@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 {
   "name": "samnail-ai-server",
   "version": "1.0.0",
@@ -11,3 +12,18 @@
     "pg": "^8.20.0"
   }
 }
+=======
+{
+  "name": "samnail-ai-server",
+  "version": "1.0.0",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.6",
+    "express": "^4.18.2",
+    "pg": "^8.20.0"
+  }
+}
+>>>>>>> 3f93643b9a0f7b27a63b984e25d67c7bd3279b0a
