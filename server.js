@@ -157,7 +157,7 @@ function looksLikeOrderQuery(message) {
   if (/\border\b/.test(text)) return true;
   if (/\bstatus\b/.test(text) && /#?\d{4,}/.test(text)) return true;
   if (/#\d{4,}/.test(text)) return true;
-  if (/\b\d{4,}\b/.test(text) && /\b(check|find|lookup|track|status)\b/.test(text)) return true;
+  if (/\b\d{4,}\b/.test(text) && /\b(check|find|lookup|track|status|where)\b/.test(text)) return true;
 
   return false;
 }
@@ -181,6 +181,134 @@ function extractEmail(message) {
   const text = String(message || "");
   const match = text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
   return match ? match[0].toLowerCase() : null;
+}
+
+function formatMoney(price) {
+  if (price === null || price === undefined || price === "") return "";
+  const num = Number(price);
+  if (Number.isNaN(num)) return `$${price}`;
+  return `$${num.toFixed(2)}`;
+}
+
+function isLowStock(inventory) {
+  return inventory !== null && inventory !== undefined && Number(inventory) > 0 && Number(inventory) <= 5;
+}
+
+function normalizeText(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function detectBudget(message) {
+  const text = String(message || "").toLowerCase();
+
+  let match = text.match(/under\s*\$?\s*(\d+(?:\.\d+)?)/i);
+  if (match) return { type: "max", value: Number(match[1]) };
+
+  match = text.match(/less than\s*\$?\s*(\d+(?:\.\d+)?)/i);
+  if (match) return { type: "max", value: Number(match[1]) };
+
+  match = text.match(/below\s*\$?\s*(\d+(?:\.\d+)?)/i);
+  if (match) return { type: "max", value: Number(match[1]) };
+
+  match = text.match(/between\s*\$?\s*(\d+(?:\.\d+)?)\s*(?:and|-)\s*\$?\s*(\d+(?:\.\d+)?)/i);
+  if (match) {
+    return {
+      type: "range",
+      min: Number(match[1]),
+      max: Number(match[2])
+    };
+  }
+
+  return null;
+}
+
+function applyBudgetFilter(products, message) {
+  const budget = detectBudget(message);
+  if (!budget || !products?.length) return products;
+
+  return products.filter((p) => {
+    const price = Number(p.price);
+    if (Number.isNaN(price)) return false;
+
+    if (budget.type === "max") {
+      return price <= budget.value;
+    }
+
+    if (budget.type === "range") {
+      return price >= budget.min && price <= budget.max;
+    }
+
+    return true;
+  });
+}
+
+function buildSmartProductReply(products, originalMessage) {
+  if (!products || !products.length) {
+    return `I couldn’t find an exact match for "${originalMessage}", but I can help you narrow it down. Try sending the brand, color, SKU, product type, or budget you want.`;
+  }
+
+  const best = products[0];
+  const alternatives = products.slice(1, 3);
+
+  let intro = `I found ${products.length === 1 ? "a good option" : "some good options"} for you. `;
+  let bestLine = `My best match is ${best.title}`;
+
+  if (best.price) {
+    bestLine += ` at ${formatMoney(best.price)}`;
+  }
+
+  if (best.inventory !== null && best.inventory !== undefined) {
+    if (Number(best.inventory) > 0) {
+      bestLine += isLowStock(best.inventory)
+        ? `, and it’s low in stock right now`
+        : `, and it’s available now`;
+    } else {
+      bestLine += `, but it looks out of stock`;
+    }
+  }
+
+  bestLine += ".";
+
+  let altLine = "";
+  if (alternatives.length) {
+    altLine = ` I also found ${alternatives.length === 1 ? "1 close alternative" : `${alternatives.length} close alternatives`} if you want to compare.`;
+  }
+
+  let closeLine = ` Would you like me to show the best option only, or compare the top ${Math.min(products.length, 3)} choices?`;
+
+  return `${intro}${bestLine}${altLine}${closeLine}`;
+}
+
+function buildSmartOrderLookupPrompt() {
+  return "I can help check that for you. Please send both your order number and the email used on the order. Example: order 12345 john@email.com";
+}
+
+function buildSmartOrderReply(order, originalMessage) {
+  if (!order) {
+    return `I couldn’t verify an order for "${originalMessage}". Please double-check the order number and the email used at checkout, and send both together.`;
+  }
+
+  let reply = `I found your order ${order.order_number}.`;
+
+  if (order.financial_status) {
+    reply += ` Payment status: ${String(order.financial_status).toLowerCase()}.`;
+  }
+
+  if (order.fulfillment_status) {
+    reply += ` Fulfillment status: ${String(order.fulfillment_status).toLowerCase()}.`;
+  }
+
+  if (order.tracking_number) {
+    reply += ` Your tracking number is ${order.tracking_number}.`;
+  }
+
+  if (order.tracking_url) {
+    reply += ` I also included a tracking link below.`;
+  }
+
+  reply += ` Let me know if you want help with shipping, delivery timing, or finding another product while you wait.`;
+
+  return reply;
 }
 
 async function shopifyGraphQL(query, variables = {}) {
@@ -364,7 +492,9 @@ async function searchShopifyOrderByNumberAndEmail(orderNumber, email) {
         order?.customer?.lastName || ""
       ].join(" ").trim();
 
-      const tracking = order?.fulfillments?.[0]?.trackingInfo?.[0] || null;
+      const fulfillments = Array.isArray(order?.fulfillments) ? order.fulfillments : [];
+      const trackingInfo = fulfillments[0]?.trackingInfo || [];
+      const tracking = trackingInfo[0] || null;
 
       return {
         type: "order",
@@ -592,41 +722,6 @@ async function searchProductsFromDb(searchText) {
   }));
 }
 
-function formatReply(products, originalMessage) {
-  if (!products.length) {
-    return `I could not find matching products for "${originalMessage}".`;
-  }
-
-  return products
-    .map((p, i) => {
-      const priceText = p.price ? ` - $${p.price}` : "";
-      const skuText = p.sku ? ` | SKU: ${p.sku}` : "";
-      const stockText = p.inventory !== null && p.inventory !== undefined ? ` | Stock: ${p.inventory}` : "";
-      return `${i + 1}. ${p.title}${priceText}${skuText}${stockText}`;
-    })
-    .join("\n");
-}
-
-function formatOrderReply(order, originalMessage) {
-  if (!order) {
-    return `I could not find an order matching "${originalMessage}". Please double-check your order number and email address.`;
-  }
-
-  const lines = [
-    `Order ${order.order_number || ""}`,
-    order.customer_name ? `Customer: ${order.customer_name}` : null,
-    order.financial_status ? `Payment: ${order.financial_status}` : null,
-    order.fulfillment_status ? `Fulfillment: ${order.fulfillment_status}` : null,
-    order.total_amount ? `Total: ${order.total_amount} ${order.currency || ""}`.trim() : null,
-    order.created_at ? `Placed: ${new Date(order.created_at).toLocaleString("en-US")}` : null,
-    order.tracking_number ? `Tracking: ${order.tracking_number}` : null,
-    order.tracking_company ? `Carrier: ${order.tracking_company}` : null,
-    order.tracking_url ? `Tracking URL: ${order.tracking_url}` : null
-  ].filter(Boolean);
-
-  return lines.join("\n");
-}
-
 app.get("/sync/products", async (req, res) => {
   try {
     const limit = Math.min(Number(req.query.limit || 50), 250);
@@ -675,7 +770,7 @@ app.post("/api/chat", async (req, res) => {
 
       if (!orderNumber || !email) {
         return res.status(200).json({
-          reply: "Please provide both your order number and email address. Example: order 12345 john@email.com",
+          reply: buildSmartOrderLookupPrompt(),
           type: "order_lookup"
         });
       }
@@ -683,7 +778,7 @@ app.post("/api/chat", async (req, res) => {
       const order = await searchShopifyOrderByNumberAndEmail(orderNumber, email);
 
       return res.status(200).json({
-        reply: formatOrderReply(order, message),
+        reply: buildSmartOrderReply(order, message),
         type: "order",
         order
       });
@@ -702,8 +797,10 @@ app.post("/api/chat", async (req, res) => {
       products = await searchShopifyProducts(message);
     }
 
+    products = applyBudgetFilter(products, message);
+
     res.status(200).json({
-      reply: formatReply(products, message),
+      reply: buildSmartProductReply(products, message),
       type: "product",
       products
     });
