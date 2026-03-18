@@ -25,7 +25,7 @@ app.use(cors({
     return callback(new Error("Not allowed by CORS: " + origin));
   },
   methods: ["GET", "POST", "OPTIONS"],
-  allowedHeaders: ["Content-Type"]
+  allowedHeaders: ["Content-Type", "x-internal-token"]
 }));
 
 app.use((req, res, next) => {
@@ -51,6 +51,21 @@ function getShopifyStore() {
 
 function getShopifyToken() {
   return process.env.SHOPIFY_ACCESS_TOKEN;
+}
+
+function getInternalToken() {
+  return process.env.INTERNAL_API_TOKEN || "";
+}
+
+function requireInternalAccess(req, res, next) {
+  const token = req.headers["x-internal-token"];
+  if (!getInternalToken()) {
+    return res.status(500).json({ error: "INTERNAL_API_TOKEN is not configured" });
+  }
+  if (token !== getInternalToken()) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+  next();
 }
 
 async function initDb() {
@@ -89,20 +104,59 @@ async function initDb() {
   `);
 
   await pool.query(`
-    CREATE INDEX IF NOT EXISTS idx_products_title ON products USING btree (title);
+    CREATE TABLE IF NOT EXISTS customers (
+      id TEXT PRIMARY KEY,
+      first_name TEXT,
+      last_name TEXT,
+      email TEXT,
+      phone TEXT,
+      tags TEXT,
+      orders_count INTEGER,
+      total_spent NUMERIC,
+      last_order_at TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT NOW()
+    );
   `);
 
   await pool.query(`
-    CREATE INDEX IF NOT EXISTS idx_products_vendor ON products USING btree (vendor);
+    CREATE TABLE IF NOT EXISTS orders (
+      id TEXT PRIMARY KEY,
+      order_number TEXT,
+      customer_id TEXT,
+      customer_email TEXT,
+      financial_status TEXT,
+      fulfillment_status TEXT,
+      total_amount NUMERIC,
+      currency TEXT,
+      created_at TIMESTAMP,
+      tracking_number TEXT,
+      tracking_company TEXT,
+      tracking_url TEXT,
+      updated_at TIMESTAMP DEFAULT NOW()
+    );
   `);
 
   await pool.query(`
-    CREATE INDEX IF NOT EXISTS idx_variants_sku ON variants USING btree (sku);
+    CREATE TABLE IF NOT EXISTS order_items (
+      id TEXT PRIMARY KEY,
+      order_id TEXT,
+      product_id TEXT,
+      variant_id TEXT,
+      title TEXT,
+      sku TEXT,
+      quantity INTEGER,
+      price NUMERIC
+    );
   `);
 
-  await pool.query(`
-    CREATE INDEX IF NOT EXISTS idx_variants_product_id ON variants USING btree (product_id);
-  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_products_title ON products USING btree (title);`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_products_vendor ON products USING btree (vendor);`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_variants_sku ON variants USING btree (sku);`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_variants_product_id ON variants USING btree (product_id);`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_customers_email ON customers USING btree (email);`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_orders_order_number ON orders USING btree (order_number);`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_orders_customer_email ON orders USING btree (customer_email);`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_order_items_order_id ON order_items USING btree (order_id);`);
 
   console.log("Database initialized");
 }
@@ -121,14 +175,16 @@ app.get("/health", async (req, res) => {
     res.status(200).json({
       status: "ok",
       db: "connected",
-      openai: process.env.OPENAI_API_KEY ? "configured" : "missing"
+      openai: process.env.OPENAI_API_KEY ? "configured" : "missing",
+      internal_api: getInternalToken() ? "configured" : "missing"
     });
   } catch (error) {
     res.status(200).json({
       status: "ok",
       db: "disconnected",
       detail: error.message || "Database not connected",
-      openai: process.env.OPENAI_API_KEY ? "configured" : "missing"
+      openai: process.env.OPENAI_API_KEY ? "configured" : "missing",
+      internal_api: getInternalToken() ? "configured" : "missing"
     });
   }
 });
@@ -878,6 +934,117 @@ async function upsertProductAndVariants(product) {
   }
 }
 
+async function upsertCustomer(customer) {
+  await pool.query(
+    `
+    INSERT INTO customers (
+      id, first_name, last_name, email, phone, tags, orders_count, total_spent, last_order_at, updated_at
+    )
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW())
+    ON CONFLICT (id) DO UPDATE SET
+      first_name = EXCLUDED.first_name,
+      last_name = EXCLUDED.last_name,
+      email = EXCLUDED.email,
+      phone = EXCLUDED.phone,
+      tags = EXCLUDED.tags,
+      orders_count = EXCLUDED.orders_count,
+      total_spent = EXCLUDED.total_spent,
+      last_order_at = EXCLUDED.last_order_at,
+      updated_at = NOW()
+    `,
+    [
+      customer.id,
+      customer.firstName || null,
+      customer.lastName || null,
+      customer.email || null,
+      customer.phone || null,
+      Array.isArray(customer.tags) ? customer.tags.join(", ") : String(customer.tags || ""),
+      Number(customer.numberOfOrders || 0),
+      customer.amountSpent?.amount ? Number(customer.amountSpent.amount) : 0,
+      customer.lastOrder?.createdAt || null
+    ]
+  );
+}
+
+async function upsertOrder(order) {
+  const customerId = order?.customer?.id || null;
+  const customerEmail = order?.customer?.email || order?.email || null;
+  const fulfillments = Array.isArray(order?.fulfillments) ? order.fulfillments : [];
+  const trackingInfo = fulfillments[0]?.trackingInfo || [];
+  const tracking = trackingInfo[0] || null;
+
+  await pool.query(
+    `
+    INSERT INTO orders (
+      id, order_number, customer_id, customer_email, financial_status, fulfillment_status,
+      total_amount, currency, created_at, tracking_number, tracking_company, tracking_url, updated_at
+    )
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,NOW())
+    ON CONFLICT (id) DO UPDATE SET
+      order_number = EXCLUDED.order_number,
+      customer_id = EXCLUDED.customer_id,
+      customer_email = EXCLUDED.customer_email,
+      financial_status = EXCLUDED.financial_status,
+      fulfillment_status = EXCLUDED.fulfillment_status,
+      total_amount = EXCLUDED.total_amount,
+      currency = EXCLUDED.currency,
+      created_at = EXCLUDED.created_at,
+      tracking_number = EXCLUDED.tracking_number,
+      tracking_company = EXCLUDED.tracking_company,
+      tracking_url = EXCLUDED.tracking_url,
+      updated_at = NOW()
+    `,
+    [
+      order.id,
+      order.name || null,
+      customerId,
+      customerEmail,
+      order.displayFinancialStatus || null,
+      order.displayFulfillmentStatus || null,
+      order.totalPriceSet?.shopMoney?.amount ? Number(order.totalPriceSet.shopMoney.amount) : 0,
+      order.totalPriceSet?.shopMoney?.currencyCode || null,
+      order.createdAt || null,
+      tracking?.number || null,
+      tracking?.company || null,
+      tracking?.url || null
+    ]
+  );
+
+  for (const edge of (order?.lineItems?.edges || [])) {
+    const item = edge.node;
+    const itemId = item.id || `${order.id}-${item.title}-${item.quantity}`;
+
+    await pool.query(
+      `
+      INSERT INTO order_items (
+        id, order_id, product_id, variant_id, title, sku, quantity, price
+      )
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+      ON CONFLICT (id) DO UPDATE SET
+        order_id = EXCLUDED.order_id,
+        product_id = EXCLUDED.product_id,
+        variant_id = EXCLUDED.variant_id,
+        title = EXCLUDED.title,
+        sku = EXCLUDED.sku,
+        quantity = EXCLUDED.quantity,
+        price = EXCLUDED.price
+      `,
+      [
+        itemId,
+        order.id,
+        item.product?.id || null,
+        item.variant?.id || null,
+        item.title || null,
+        item.variant?.sku || null,
+        Number(item.quantity || 0),
+        item.originalUnitPriceSet?.shopMoney?.amount
+          ? Number(item.originalUnitPriceSet.shopMoney.amount)
+          : 0
+      ]
+    );
+  }
+}
+
 async function fetchShopifyProductsPage(limit = 50, afterCursor = null) {
   const graphqlQuery = `
     query FetchProductsPage($first: Int!, $after: String) {
@@ -925,6 +1092,122 @@ async function fetchShopifyProductsPage(limit = 50, afterCursor = null) {
   };
 }
 
+async function fetchShopifyCustomersPage(limit = 50, afterCursor = null) {
+  const graphqlQuery = `
+    query FetchCustomersPage($first: Int!, $after: String) {
+      customers(first: $first, after: $after, sortKey: UPDATED_AT, reverse: true) {
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+        edges {
+          node {
+            id
+            firstName
+            lastName
+            email
+            phone
+            tags
+            numberOfOrders
+            amountSpent {
+              amount
+              currencyCode
+            }
+            lastOrder {
+              createdAt
+            }
+          }
+        }
+      }
+    }
+  `;
+
+  const result = await shopifyGraphQL(graphqlQuery, {
+    first: limit,
+    after: afterCursor
+  });
+
+  return result?.data?.customers || {
+    pageInfo: { hasNextPage: false, endCursor: null },
+    edges: []
+  };
+}
+
+async function fetchShopifyOrdersPage(limit = 50, afterCursor = null) {
+  const graphqlQuery = `
+    query FetchOrdersPage($first: Int!, $after: String) {
+      orders(first: $first, after: $after, sortKey: PROCESSED_AT, reverse: true) {
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+        edges {
+          node {
+            id
+            name
+            email
+            displayFinancialStatus
+            displayFulfillmentStatus
+            totalPriceSet {
+              shopMoney {
+                amount
+                currencyCode
+              }
+            }
+            createdAt
+            customer {
+              id
+              email
+              firstName
+              lastName
+              phone
+            }
+            fulfillments(first: 5) {
+              trackingInfo {
+                company
+                number
+                url
+              }
+            }
+            lineItems(first: 50) {
+              edges {
+                node {
+                  id
+                  title
+                  quantity
+                  product {
+                    id
+                  }
+                  variant {
+                    id
+                    sku
+                  }
+                  originalUnitPriceSet {
+                    shopMoney {
+                      amount
+                      currencyCode
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  `;
+
+  const result = await shopifyGraphQL(graphqlQuery, {
+    first: limit,
+    after: afterCursor
+  });
+
+  return result?.data?.orders || {
+    pageInfo: { hasNextPage: false, endCursor: null },
+    edges: []
+  };
+}
+
 async function syncProductsFromShopify(limit = 50) {
   const page = await fetchShopifyProductsPage(limit, null);
   const products = page.edges || [];
@@ -955,14 +1238,64 @@ async function syncAllProductsFromShopify(batchSize = 250, maxPages = 500) {
     after = page?.pageInfo?.endCursor || null;
     pages += 1;
 
-    console.log(`Synced page ${pages}, batch ${products.length}, total ${totalSynced}`);
-
     if (!products.length) break;
   }
 
   return {
     success: true,
     synced_products: totalSynced,
+    pages_processed: pages,
+    has_more: hasNextPage
+  };
+}
+
+async function syncCustomersFromShopify(limit = 50) {
+  const page = await fetchShopifyCustomersPage(limit, null);
+  const customers = page.edges || [];
+
+  for (const edge of customers) {
+    await upsertCustomer(edge.node);
+  }
+
+  return { synced_customers: customers.length };
+}
+
+async function syncOrdersFromShopify(limit = 50) {
+  const page = await fetchShopifyOrdersPage(limit, null);
+  const orders = page.edges || [];
+
+  for (const edge of orders) {
+    await upsertOrder(edge.node);
+  }
+
+  return { synced_orders: orders.length };
+}
+
+async function syncAllOrdersFromShopify(batchSize = 100, maxPages = 200) {
+  let after = null;
+  let hasNextPage = true;
+  let totalSynced = 0;
+  let pages = 0;
+
+  while (hasNextPage && pages < maxPages) {
+    const page = await fetchShopifyOrdersPage(batchSize, after);
+    const orders = page.edges || [];
+
+    for (const edge of orders) {
+      await upsertOrder(edge.node);
+      totalSynced += 1;
+    }
+
+    hasNextPage = Boolean(page?.pageInfo?.hasNextPage);
+    after = page?.pageInfo?.endCursor || null;
+    pages += 1;
+
+    if (!orders.length) break;
+  }
+
+  return {
+    success: true,
+    synced_orders: totalSynced,
     pages_processed: pages,
     has_more: hasNextPage
   };
@@ -1079,21 +1412,84 @@ async function semanticSearchProducts(searchText, limit = 10) {
   }));
 }
 
+function buildBundleSearchTerms(product) {
+  const title = String(product?.title || "").toLowerCase();
+  const type = String(product?.product_type || "").toLowerCase();
+
+  if (title.includes("dip") || type.includes("dip")) {
+    return ["base coat", "activator", "top coat"];
+  }
+
+  if (title.includes("acrylic") || type.includes("acrylic")) {
+    return ["monomer", "primer", "acrylic brush"];
+  }
+
+  if (title.includes("gel") || type.includes("gel")) {
+    return ["base coat", "top coat", "lamp"];
+  }
+
+  if (title.includes("polish") || type.includes("polish")) {
+    return ["base coat", "top coat"];
+  }
+
+  return [];
+}
+
+async function findBundleProducts(primaryProduct) {
+  if (!primaryProduct) return [];
+
+  const terms = buildBundleSearchTerms(primaryProduct);
+  const results = [];
+
+  for (const term of terms) {
+    let found = [];
+
+    try {
+      found = await searchProductsFromDb(term);
+    } catch (error) {
+      console.error("BUNDLE DB SEARCH ERROR:", error.message);
+    }
+
+    if (!found.length) {
+      try {
+        found = await searchShopifyProducts(term);
+      } catch (error) {
+        console.error("BUNDLE SHOPIFY SEARCH ERROR:", error.message);
+      }
+    }
+
+    if (found.length) {
+      const ranked = rankProducts(found, term);
+      const best = ranked[0];
+
+      if (best && best.variant_id) {
+        results.push(best);
+      }
+    }
+  }
+
+  const unique = [];
+  const seen = new Set();
+
+  for (const item of results) {
+    const key = item.variant_id || item.id;
+    if (!seen.has(key)) {
+      seen.add(key);
+      unique.push(item);
+    }
+  }
+
+  return unique.slice(0, 3);
+}
+
 app.get("/sync/products", async (req, res) => {
   try {
     const limit = Math.min(Number(req.query.limit || 50), 250);
     const result = await syncProductsFromShopify(limit);
-
-    res.status(200).json({
-      success: true,
-      ...result
-    });
+    res.status(200).json({ success: true, ...result });
   } catch (error) {
     console.error("SYNC PRODUCTS ERROR:", error);
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
@@ -1101,15 +1497,107 @@ app.get("/sync/products/all", async (req, res) => {
   try {
     const batchSize = Math.min(Number(req.query.batch || 250), 250);
     const maxPages = Number(req.query.max_pages || 500);
-
     const result = await syncAllProductsFromShopify(batchSize, maxPages);
     res.status(200).json(result);
   } catch (error) {
     console.error("SYNC ALL PRODUCTS ERROR:", error);
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/sync/customers", requireInternalAccess, async (req, res) => {
+  try {
+    const limit = Math.min(Number(req.query.limit || 50), 250);
+    const result = await syncCustomersFromShopify(limit);
+    res.status(200).json({ success: true, ...result });
+  } catch (error) {
+    console.error("SYNC CUSTOMERS ERROR:", error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/sync/orders", requireInternalAccess, async (req, res) => {
+  try {
+    const limit = Math.min(Number(req.query.limit || 50), 100);
+    const result = await syncOrdersFromShopify(limit);
+    res.status(200).json({ success: true, ...result });
+  } catch (error) {
+    console.error("SYNC ORDERS ERROR:", error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/sync/orders/all", requireInternalAccess, async (req, res) => {
+  try {
+    const batchSize = Math.min(Number(req.query.batch || 100), 100);
+    const maxPages = Number(req.query.max_pages || 200);
+    const result = await syncAllOrdersFromShopify(batchSize, maxPages);
+    res.status(200).json(result);
+  } catch (error) {
+    console.error("SYNC ALL ORDERS ERROR:", error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/internal/customer/search", requireInternalAccess, async (req, res) => {
+  try {
+    const q = String(req.query.q || "").trim().toLowerCase();
+    if (!q) return res.status(400).json({ error: "Query is required" });
+
+    const like = `%${q}%`;
+
+    const result = await pool.query(
+      `
+      SELECT
+        id, first_name, last_name, email, phone, tags,
+        orders_count, total_spent, last_order_at
+      FROM customers
+      WHERE
+        LOWER(COALESCE(email, '')) LIKE $1
+        OR LOWER(COALESCE(first_name, '')) LIKE $1
+        OR LOWER(COALESCE(last_name, '')) LIKE $1
+        OR LOWER(COALESCE(phone, '')) LIKE $1
+      ORDER BY total_spent DESC NULLS LAST, last_order_at DESC NULLS LAST
+      LIMIT 20
+      `,
+      [like]
+    );
+
+    res.status(200).json({ success: true, customers: result.rows });
+  } catch (error) {
+    console.error("INTERNAL CUSTOMER SEARCH ERROR:", error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/internal/order/search", requireInternalAccess, async (req, res) => {
+  try {
+    const q = String(req.query.q || "").trim().toLowerCase();
+    if (!q) return res.status(400).json({ error: "Query is required" });
+
+    const like = `%${q}%`;
+
+    const result = await pool.query(
+      `
+      SELECT
+        o.id, o.order_number, o.customer_id, o.customer_email,
+        o.financial_status, o.fulfillment_status, o.total_amount,
+        o.currency, o.created_at, o.tracking_number, o.tracking_company, o.tracking_url
+      FROM orders o
+      WHERE
+        LOWER(COALESCE(o.order_number, '')) LIKE $1
+        OR LOWER(COALESCE(o.customer_email, '')) LIKE $1
+        OR LOWER(COALESCE(o.tracking_number, '')) LIKE $1
+      ORDER BY o.created_at DESC NULLS LAST
+      LIMIT 20
+      `,
+      [like]
+    );
+
+    res.status(200).json({ success: true, orders: result.rows });
+  } catch (error) {
+    console.error("INTERNAL ORDER SEARCH ERROR:", error);
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
@@ -1180,9 +1668,37 @@ app.post("/api/chat", async (req, res) => {
       }
     }
 
+    const primaryProduct = products[0] || null;
+    const relatedProducts = await findBundleProducts(primaryProduct);
+
     return res.status(200).json({
       reply: buildBeautySalesReplyV2(products, message),
       type: "product",
+      action: primaryProduct?.variant_id ? "add_to_cart_ready" : "view_only",
+      primary_product: primaryProduct
+        ? {
+            id: primaryProduct.id,
+            title: primaryProduct.title,
+            price: primaryProduct.price,
+            image: primaryProduct.image,
+            url: primaryProduct.url,
+            variant_id: primaryProduct.variant_id,
+            variant_title: primaryProduct.variant_title,
+            sku: primaryProduct.sku,
+            inventory: primaryProduct.inventory
+          }
+        : null,
+      related_products: relatedProducts.map((p) => ({
+        id: p.id,
+        title: p.title,
+        price: p.price,
+        image: p.image,
+        url: p.url,
+        variant_id: p.variant_id,
+        variant_title: p.variant_title,
+        sku: p.sku,
+        inventory: p.inventory
+      })),
       products
     });
   } catch (error) {
