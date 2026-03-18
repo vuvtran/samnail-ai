@@ -193,6 +193,57 @@ app.get("/api/chat", (req, res) => {
   res.status(200).send("API chat route is live. Use POST to send a message.");
 });
 
+//*****findBundleProducts******\\
+
+async function findBundleProducts(primaryProduct) {
+  if (!primaryProduct || !primaryProduct.title) return [];
+
+  const terms = buildBundleSearchTerms(primaryProduct);
+  const results = [];
+
+  for (const term of terms) {
+    let found = [];
+
+    try {
+      found = await searchProductsFromDb(term);
+    } catch (error) {
+      console.error("BUNDLE DB SEARCH ERROR:", error.message);
+    }
+
+    if (!found.length) {
+      try {
+        found = await searchShopifyProducts(term);
+      } catch (error) {
+        console.error("BUNDLE SHOPIFY SEARCH ERROR:", error.message);
+      }
+    }
+
+    if (found.length) {
+      const ranked = rankProducts(found, term);
+      const best = ranked[0];
+
+      if (best && best.variant_id) {
+        results.push(best);
+      }
+    }
+  }
+
+  const unique = [];
+  const seen = new Set();
+
+  for (const item of results) {
+    const key = item?.variant_id || item?.id;
+    if (key && !seen.has(key)) {
+      seen.add(key);
+      unique.push(item);
+    }
+  }
+
+  return unique.slice(0, 3);
+}
+
+//*End*\\
+
 function escapeShopifySearch(text) {
   return String(text || "")
     .trim()
@@ -1668,10 +1719,20 @@ app.post("/api/chat", async (req, res) => {
       }
     }
 
-    const primaryProduct = products[0] || null;
-    const relatedProducts = await findBundleProducts(primaryProduct);
+const primaryProduct = products[0] || null;
 
-    return res.status(200).json({
+let relatedProducts = [];
+try {
+  relatedProducts = await findBundleProducts(primaryProduct);
+} catch (bundleError) {
+  console.error("BUNDLE LOOKUP ERROR:", bundleError.message);
+  relatedProducts = [];
+}
+
+return res.status(200).json({
+
+
+
       reply: buildBeautySalesReplyV2(products, message),
       type: "product",
       action: primaryProduct?.variant_id ? "add_to_cart_ready" : "view_only",
