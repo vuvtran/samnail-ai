@@ -3,12 +3,25 @@ const cors = require("cors");
 const { Pool } = require("pg");
 const OpenAI = require("openai");
 
+console.log("SERVER VERSION: BUNDLE_SAFE_V3");
+
 const app = express();
 app.use(express.json());
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY
-});
+let openai = null;
+if (process.env.OPENAI_API_KEY) {
+  try {
+    openai = new OpenAI({
+      apiKey: process.env.OPENAI_API_KEY
+    });
+    console.log("OpenAI client initialized");
+  } catch (error) {
+    console.error("OpenAI init failed:", error.message);
+    openai = null;
+  }
+} else {
+  console.warn("OPENAI_API_KEY is missing");
+}
 
 const allowedOrigins = [
   "http://localhost:3000",
@@ -175,16 +188,18 @@ app.get("/health", async (req, res) => {
     res.status(200).json({
       status: "ok",
       db: "connected",
-      openai: process.env.OPENAI_API_KEY ? "configured" : "missing",
-      internal_api: getInternalToken() ? "configured" : "missing"
+      openai: openai ? "configured" : "missing",
+      internal_api: getInternalToken() ? "configured" : "missing",
+      version: "BUNDLE_SAFE_V3"
     });
   } catch (error) {
     res.status(200).json({
       status: "ok",
       db: "disconnected",
       detail: error.message || "Database not connected",
-      openai: process.env.OPENAI_API_KEY ? "configured" : "missing",
-      internal_api: getInternalToken() ? "configured" : "missing"
+      openai: openai ? "configured" : "missing",
+      internal_api: getInternalToken() ? "configured" : "missing",
+      version: "BUNDLE_SAFE_V3"
     });
   }
 });
@@ -192,57 +207,6 @@ app.get("/health", async (req, res) => {
 app.get("/api/chat", (req, res) => {
   res.status(200).send("API chat route is live. Use POST to send a message.");
 });
-
-//*****findBundleProducts******\\
-
-async function findBundleProducts(primaryProduct) {
-  if (!primaryProduct || !primaryProduct.title) return [];
-
-  const terms = buildBundleSearchTerms(primaryProduct);
-  const results = [];
-
-  for (const term of terms) {
-    let found = [];
-
-    try {
-      found = await searchProductsFromDb(term);
-    } catch (error) {
-      console.error("BUNDLE DB SEARCH ERROR:", error.message);
-    }
-
-    if (!found.length) {
-      try {
-        found = await searchShopifyProducts(term);
-      } catch (error) {
-        console.error("BUNDLE SHOPIFY SEARCH ERROR:", error.message);
-      }
-    }
-
-    if (found.length) {
-      const ranked = rankProducts(found, term);
-      const best = ranked[0];
-
-      if (best && best.variant_id) {
-        results.push(best);
-      }
-    }
-  }
-
-  const unique = [];
-  const seen = new Set();
-
-  for (const item of results) {
-    const key = item?.variant_id || item?.id;
-    if (key && !seen.has(key)) {
-      seen.add(key);
-      unique.push(item);
-    }
-  }
-
-  return unique.slice(0, 3);
-}
-
-//*End*\\
 
 function escapeShopifySearch(text) {
   return String(text || "")
@@ -700,7 +664,7 @@ function buildEmbeddingText(product, variant = null) {
 async function createEmbedding(text) {
   const input = String(text || "").trim();
   if (!input) return null;
-  if (!process.env.OPENAI_API_KEY) return null;
+  if (!openai) return null;
 
   const result = await openai.embeddings.create({
     model: "text-embedding-3-small",
@@ -875,7 +839,14 @@ async function searchShopifyOrderByNumberAndEmail(orderNumber, email) {
   ];
 
   for (const q of queriesToTry) {
-    const result = await shopifyGraphQL(graphqlQuery, { query: q });
+    let result;
+    try {
+      result = await shopifyGraphQL(graphqlQuery, { query: q });
+    } catch (error) {
+      console.error("ORDER LOOKUP SHOPIFY ERROR:", error.message);
+      continue;
+    }
+
     const edges = result?.data?.orders?.edges || [];
 
     for (const edge of edges) {
@@ -1413,7 +1384,7 @@ async function searchProductsFromDb(searchText) {
 }
 
 async function semanticSearchProducts(searchText, limit = 10) {
-  if (!process.env.OPENAI_API_KEY) return [];
+  if (!openai) return [];
 
   const embedding = await createEmbedding(searchText);
   if (!embedding) return [];
@@ -1487,7 +1458,7 @@ function buildBundleSearchTerms(product) {
 }
 
 async function findBundleProducts(primaryProduct) {
-  if (!primaryProduct) return [];
+  if (!primaryProduct || !primaryProduct.title) return [];
 
   const terms = buildBundleSearchTerms(primaryProduct);
   const results = [];
@@ -1497,15 +1468,19 @@ async function findBundleProducts(primaryProduct) {
 
     try {
       found = await searchProductsFromDb(term);
+      if (!Array.isArray(found)) found = [];
     } catch (error) {
       console.error("BUNDLE DB SEARCH ERROR:", error.message);
+      found = [];
     }
 
     if (!found.length) {
       try {
         found = await searchShopifyProducts(term);
+        if (!Array.isArray(found)) found = [];
       } catch (error) {
         console.error("BUNDLE SHOPIFY SEARCH ERROR:", error.message);
+        found = [];
       }
     }
 
@@ -1523,8 +1498,8 @@ async function findBundleProducts(primaryProduct) {
   const seen = new Set();
 
   for (const item of results) {
-    const key = item.variant_id || item.id;
-    if (!seen.has(key)) {
+    const key = item?.variant_id || item?.id;
+    if (key && !seen.has(key)) {
       seen.add(key);
       unique.push(item);
     }
@@ -1660,6 +1635,8 @@ app.post("/api/chat", async (req, res) => {
       return res.status(400).json({ error: "Message is required" });
     }
 
+    console.log("CHAT MESSAGE:", message);
+
     if (looksLikeOnlyEmail(message)) {
       return res.status(200).json({
         reply: "Please include your order number with your email so I can check the order. Example: order 12345 john@email.com",
@@ -1691,8 +1668,10 @@ app.post("/api/chat", async (req, res) => {
 
     try {
       products = await searchProductsFromDb(message);
+      if (!Array.isArray(products)) products = [];
     } catch (dbError) {
       console.error("DB SEARCH ERROR:", dbError.message);
+      products = [];
     }
 
     products = applyBudgetFilter(products, message);
@@ -1701,10 +1680,12 @@ app.post("/api/chat", async (req, res) => {
     if (!products.length) {
       try {
         products = await semanticSearchProducts(message, 10);
+        if (!Array.isArray(products)) products = [];
         products = applyBudgetFilter(products, message);
         products = rankProducts(products, message);
       } catch (semanticError) {
         console.error("SEMANTIC SEARCH ERROR:", semanticError.message);
+        products = [];
       }
     }
 
@@ -1712,27 +1693,30 @@ app.post("/api/chat", async (req, res) => {
       try {
         console.log("No DB or semantic match, falling back to Shopify live search");
         products = await searchShopifyProducts(message);
+        if (!Array.isArray(products)) products = [];
         products = applyBudgetFilter(products, message);
         products = rankProducts(products, message);
       } catch (shopifyError) {
         console.error("SHOPIFY FALLBACK ERROR:", shopifyError.message);
+        products = [];
       }
     }
 
-const primaryProduct = products[0] || null;
+    const primaryProduct = products[0] || null;
 
-let relatedProducts = [];
-try {
-  relatedProducts = await findBundleProducts(primaryProduct);
-} catch (bundleError) {
-  console.error("BUNDLE LOOKUP ERROR:", bundleError.message);
-  relatedProducts = [];
-}
+    let relatedProducts = [];
+    try {
+      relatedProducts = await findBundleProducts(primaryProduct);
+      if (!Array.isArray(relatedProducts)) relatedProducts = [];
+    } catch (bundleError) {
+      console.error("BUNDLE LOOKUP ERROR:", bundleError.message);
+      relatedProducts = [];
+    }
 
-return res.status(200).json({
+    console.log("PRIMARY PRODUCT:", primaryProduct?.title || null);
+    console.log("RELATED PRODUCTS COUNT:", relatedProducts.length);
 
-
-
+    return res.status(200).json({
       reply: buildBeautySalesReplyV2(products, message),
       type: "product",
       action: primaryProduct?.variant_id ? "add_to_cart_ready" : "view_only",
@@ -1777,16 +1761,18 @@ async function startServer() {
   console.log("Starting app...");
   console.log("PORT =", PORT);
 
-  app.listen(PORT, "0.0.0.0", async () => {
-    console.log(`Listening on ${PORT}`);
+  try {
+    await initDb();
+    console.log("Database ready");
+  } catch (error) {
+    console.error("Database init failed:", error.message);
+  }
 
-    try {
-      await initDb();
-      console.log("Database ready");
-    } catch (error) {
-      console.error("Database init skipped:", error.message);
-    }
+  app.listen(PORT, "0.0.0.0", () => {
+    console.log(`Listening on ${PORT}`);
   });
 }
 
-startServer();
+startServer().catch((error) => {
+  console.error("FATAL STARTUP ERROR:", error);
+});
